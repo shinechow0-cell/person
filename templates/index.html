@@ -1,0 +1,494 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>仪表盘</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<!-- ═══ 顶栏 · 玻璃拟态 ═══ -->
+<header>
+  <div class="header-left">
+    <div class="logo-block">
+      <div class="logo-mark"></div>
+      <span class="logo-text">仪表盘<span>Dashboard</span></span>
+    </div>
+    <span class="live-clock" id="live-clock">--:--:--</span>
+  </div>
+  <div class="header-right">
+    <span id="status-badge"></span>
+    <div class="check-dropdown" id="check-dropdown">
+      <button class="check-toggle" id="check-toggle" onclick="toggleCheckPanel()" title="当天检测状态">
+        <span class="check-dot" id="check-dot"></span>
+        <span class="check-label">检测</span>
+      </button>
+      <div class="check-panel" id="check-panel"></div>
+    </div>
+    <button id="theme-toggle" title="切换浅色/深色主题" onclick="toggleTheme()">
+      <span class="icon-sun">☀️</span>
+      <span class="icon-moon">🌙</span>
+    </button>
+    <button id="view-toggle" title="切换PC/手机视图" onclick="switchView()">📱</button>
+  </div>
+</header>
+
+<!-- ═══ 快速导航栏 ═══ -->
+<nav class="quick-nav" id="quick-nav">
+  <a class="quick-nav-item" href="#col-jobs" data-section="jobs">💼 社招监控 <span class="nav-arrow">→</span></a>
+  <a class="quick-nav-item" href="#col-stocks" data-section="stocks">📈 A股市场 <span class="nav-arrow">→</span></a>
+  <a class="quick-nav-item" href="#col-wiki" data-section="wiki">📚 读书笔记 <span class="nav-arrow">→</span></a>
+</nav>
+
+<!-- ═══ 日期导航器 ═══ -->
+<div class="date-navigator">
+  <button class="date-nav-btn" id="date-prev" title="前一天" onclick="changeDate(-1)">◀</button>
+  <div class="date-strip" id="date-strip"></div>
+  <button class="date-jump-today" id="date-jump-btn" onclick="jumpToToday()">📅 今天</button>
+  <button class="date-nav-btn" id="date-next" title="后一天" onclick="changeDate(1)">▶</button>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════ -->
+<!-- BENTO GRID · 首页摘要卡片                                  -->
+<!-- ═══════════════════════════════════════════════════════════ -->
+<div class="bento-grid">
+
+  <!-- ━━ 卡片 1: 💼 社招监控 · 摘要 ━━ -->
+  <div class="bento-card span-2" id="col-jobs">
+    <div class="card-header">
+      <span class="card-icon">💼</span> 社招监控
+      <span class="card-status" id="jobs-card-status"><span class="cs-dot"></span><span class="cs-text">加载中...</span></span>
+      <span class="card-badge text-mono text-muted" id="job-date-label"></span>
+      <a href="/detail/jobs" class="card-header-link">详情 →</a>
+    </div>
+    <div class="card-body card-compact">
+      <div class="summary-hero">
+        <span class="summary-num" id="job-num">-</span>
+        <span class="summary-label">个新增岗位</span>
+      </div>
+      <div class="summary-tags" id="job-summary-tags"></div>
+      <div id="jobs-preview"></div>
+    </div>
+  </div>
+
+  <!-- ━━ 卡片 2: 📈 A股市场 · 摘要 ━━ -->
+  <div class="bento-card span-2" id="col-stocks">
+    <div class="card-header">
+      <span class="card-icon">📈</span> A股市场
+      <span class="card-status" id="stocks-card-status"><span class="cs-dot"></span><span class="cs-text">加载中...</span></span>
+      <a href="/detail/stocks" class="card-header-link">详情 →</a>
+    </div>
+    <div class="card-body card-compact">
+      <div id="market-preview">
+        <div class="skeleton skeleton-num" style="height:28px;width:80px;"></div>
+        <div class="skeleton skeleton-text short"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ━━ 卡片 3: 📚 读书笔记 · 摘要 ━━ -->
+  <div class="bento-card span-2" id="col-wiki">
+    <div class="card-header">
+      <span class="card-icon">📚</span> 读书笔记
+      <a href="/detail/wiki" class="card-header-link">详情 →</a>
+    </div>
+    <div class="card-body card-compact">
+      <div id="wiki-preview">
+        <div class="skeleton skeleton-text"></div>
+        <div class="skeleton skeleton-text short"></div>
+      </div>
+    </div>
+  </div>
+
+</div><!-- /bento-grid -->
+
+<footer>仪表盘 · 自动刷新</footer>
+
+<script>
+// ═══════════════════════════════════════════════════════════════
+// 全局状态
+// ═══════════════════════════════════════════════════════════════
+let currentDate = '';
+let jobDates = [], stockDates = [], allDates = [];
+
+// ═══ 实时时钟 ═══
+function updateClock() {
+  document.getElementById('live-clock').textContent =
+    new Date().toLocaleTimeString('zh-CN', { hour12: false });
+}
+updateClock(); setInterval(updateClock, 1000);
+
+// ═══ 视图切换 ═══
+function switchView() {
+  const body = document.body;
+  const next = (body.getAttribute('data-view') || 'pc') === 'pc' ? 'mobile' : 'pc';
+  body.setAttribute('data-view', next);
+  localStorage.setItem('dashboard-view', next);
+  const btn = document.getElementById('view-toggle');
+  btn.textContent = next === 'pc' ? '📱' : '💻';
+  btn.title = next === 'pc' ? '切换到手机视图' : '切换到PC视图';
+}
+
+// ═══ 主题切换 ═══
+function toggleTheme() {
+  const html = document.documentElement;
+  const next = html.getAttribute('data-theme') === 'light' ? null : 'light';
+  if (next) html.setAttribute('data-theme', next);
+  else html.removeAttribute('data-theme');
+  localStorage.setItem('dashboard-theme', next || 'dark');
+}
+function initTheme() {
+  if (localStorage.getItem('dashboard-theme') === 'dark')
+    document.documentElement.removeAttribute('data-theme');
+  else document.documentElement.setAttribute('data-theme', 'light');
+}
+
+// ═══ 初始化 ═══
+async function init() {
+  initTheme();
+  const v = localStorage.getItem('dashboard-view') || 'pc';
+  document.body.setAttribute('data-view', v);
+  const btn = document.getElementById('view-toggle');
+  btn.textContent = v === 'pc' ? '📱' : '💻';
+  currentDate = new Date().toISOString().slice(0, 10);
+  await loadDates();
+  await loadAll();
+  loadExecStatus();
+}
+
+// ═══ 日期加载 ═══
+async function loadDates() {
+  try {
+    const [jr, sr] = await Promise.all([
+      fetch('/api/jobs/dates').then(r => r.json()),
+      fetch('/api/stocks/dates').then(r => r.json()),
+    ]);
+    jobDates = jr.dates || []; stockDates = sr.dates || [];
+    allDates = [...new Set([...jobDates, ...stockDates])].sort();
+    renderDateStrip();
+  } catch(e) { console.error(e); }
+}
+
+function getDisplayDates() {
+  const today = new Date().toISOString().slice(0, 10);
+  const dates = [...allDates];
+  if (!dates.includes(today)) dates.push(today);
+  return dates.sort();
+}
+
+function renderDateStrip() {
+  const strip = document.getElementById('date-strip');
+  const today = new Date().toISOString().slice(0, 10);
+  const dates = getDisplayDates();
+  const idx = dates.indexOf(currentDate);
+
+  strip.innerHTML = dates.map(d => {
+    const cls = ['date-chip'];
+    if (d === currentDate) cls.push('selected');
+    if (d === today) cls.push('today-chip');
+    return `<button class="${cls.join(' ')}" data-date="${d}">${d.slice(5)}</button>`;
+  }).join('');
+
+  strip.querySelectorAll('.date-chip').forEach(chip => {
+    chip.addEventListener('click', function() {
+      currentDate = this.dataset.date; renderDateStrip(); loadAll();
+    });
+  });
+
+  const sel = strip.querySelector('.date-chip.selected');
+  if (sel) sel.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'center' });
+
+  document.getElementById('date-prev').disabled = idx <= 0;
+  document.getElementById('date-next').disabled = idx >= dates.length - 1;
+  const label = document.getElementById('job-date-label');
+  if (label) label.textContent = currentDate;
+}
+
+function jumpToToday() { currentDate = new Date().toISOString().slice(0,10); renderDateStrip(); loadAll(); }
+function changeDate(d) { const dd = getDisplayDates(); const i = dd.indexOf(currentDate); if (i < 0) return; const ni = i+d; if (ni>=0 && ni<dd.length) { currentDate = dd[ni]; renderDateStrip(); loadAll(); } }
+
+// ═══ 快速导航 · 平滑滚动 ═══
+document.querySelectorAll('.quick-nav-item[href^="#"]').forEach(item => {
+  item.addEventListener('click', function(e) {
+    e.preventDefault();
+    const t = document.querySelector(this.getAttribute('href'));
+    if (t) {
+      const h = document.querySelector('header').offsetHeight + 60;
+      window.scrollTo({ top: t.getBoundingClientRect().top + window.scrollY - h, behavior: 'smooth' });
+    }
+  });
+});
+let _navItems = document.querySelectorAll('.quick-nav-item[href^="#"]');
+let _sectionIds = Array.from(_navItems).map(i => i.getAttribute('href'));
+window.addEventListener('scroll', () => {
+  let active = null;
+  const h = document.querySelector('header').offsetHeight + 60;
+  _sectionIds.forEach(id => { const el = document.querySelector(id); if (el && el.getBoundingClientRect().top < h + 200) active = id; });
+  _navItems.forEach(i => i.classList.toggle('active', i.getAttribute('href') === active));
+}, { passive: true });
+
+// ═══ 键盘 ═══
+document.addEventListener('keydown', function(e) {
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+  if (e.key === 'ArrowLeft') { e.preventDefault(); changeDate(-1); }
+  if (e.key === 'ArrowRight') { e.preventDefault(); changeDate(1); }
+  if (e.key === 't' && !e.metaKey && !e.ctrlKey) { e.preventDefault(); jumpToToday(); }
+});
+
+// ═══ 全量加载 ═══
+async function loadAll() {
+  await Promise.all([loadJobs(), loadMarket(), loadWiki()]);
+}
+
+// ═══════════════════════════════════════════════════════════════
+// 社招岗位 · 摘要版
+// ═══════════════════════════════════════════════════════════════
+async function loadJobs() {
+  try {
+    const r = await fetch(`/api/jobs?date=${currentDate}`).then(r => r.json());
+    document.getElementById('job-num').textContent = r.count || 0;
+
+    const badge = document.getElementById('status-badge');
+    if (r.count > 0) { badge.textContent = `🆕 ${r.count} 新岗位`; badge.className = 'visible'; }
+    else { badge.className = ''; badge.textContent = ''; }
+
+    if (!r.jobs || r.jobs.length === 0) {
+      document.getElementById('jobs-preview').innerHTML = '<div class="empty-state">当日无新增岗位</div>';
+      document.getElementById('job-summary-tags').innerHTML = '';
+      return;
+    }
+
+    // 按级别分组统计
+    const byTag = {}; const tagOrder = ['🔥 高度匹配', '⭐ 推荐关注', '💡 可以看看', '📋 一般岗位'];
+    r.jobs.forEach(j => { const t = j.tag || '📋 一般岗位'; if (!byTag[t]) byTag[t] = []; byTag[t].push(j); });
+
+    // 摘要标签行
+    let tagsHtml = '';
+    tagOrder.forEach(tag => {
+      if (byTag[tag]) {
+        const cls = tag.includes('🔥') ? 's-tag-fire' : tag.includes('⭐') ? 's-tag-star' : tag.includes('💡') ? 's-tag-light' : 's-tag-general';
+        tagsHtml += `<span class="summary-tag ${cls}">${tag} ${byTag[tag].length}</span>`;
+      }
+    });
+    document.getElementById('job-summary-tags').innerHTML = tagsHtml;
+
+    // 仅显示前 5 条
+    const preview = r.jobs.slice(0, 5);
+    let html = '';
+    preview.forEach(j => {
+      const dl = j.deadline ? ` <span class="job-deadline">${j.deadline}</span>` : '';
+      html += `<div class="job-item job-item-compact">
+        <a href="${j.link}" target="_blank" rel="noopener">${j.title}</a>${dl}
+        <span class="job-meta">${j.source} · ${j.score}分</span>
+      </div>`;
+    });
+    if (r.jobs.length > 5) html += `<div class="more-row">...还有 ${r.jobs.length - 5} 条</div>`;
+    document.getElementById('jobs-preview').innerHTML = html;
+  } catch(e) { console.error(e); }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// A股市场 · 摘要版 (只看大盘+指数)
+// ═══════════════════════════════════════════════════════════════
+async function loadMarket() {
+  try {
+    const r = await fetch(`/api/stocks/summary?date=${currentDate}`).then(r => r.json());
+    if (r.error) {
+      document.getElementById('market-preview').innerHTML = '<div class="empty-state">当日无A股数据</div>';
+      return;
+    }
+    const s = r.summary; let html = '';
+
+    const total = s.up_count + s.down_count + s.flat_count;
+    if (total > 0) {
+      const upPct = (s.up_count / total * 100).toFixed(1);
+      const downPct = (s.down_count / total * 100).toFixed(1);
+      html += `<div class="market-breadth">
+        <div class="breadth-bar">
+          <div class="breadth-up" style="width:${upPct}%">${s.up_count}↑</div>
+          <div class="breadth-down" style="width:${downPct}%">${s.down_count}↓</div>
+        </div>
+        <div class="breadth-info">
+          <span>成交 <b>${s.total_amount_yi}亿</b></span>
+          ${s.total_limit_up ? `<span>涨停 <b class="up">${s.total_limit_up}</b></span>` : ''}
+          ${s.total_limit_down ? `<span>跌停 <b class="down">${s.total_limit_down}</b></span>` : ''}
+        </div></div>`;
+    }
+
+    if (s.indices && s.indices.length > 0) {
+      html += '<div class="index-row">';
+      s.indices.forEach(idx => {
+        const cls = idx.avg_change_pct >= 0 ? 'up' : 'down';
+        html += `<div class="index-card ${cls}">
+          <div class="index-name">${idx.name}</div>
+          <div class="index-chg ${cls}">${idx.avg_change_pct >= 0 ? '+' : ''}${idx.avg_change_pct}%</div>
+          <div class="index-sub">涨${idx.up} 跌${idx.down} ${idx.amount_yi}亿</div></div>`;
+      });
+      html += '</div>';
+    }
+
+    document.getElementById('market-preview').innerHTML = html;
+  } catch(e) { console.error(e); }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// 读书笔记 · 摘要版 (只显示计数)
+// ═══════════════════════════════════════════════════════════════
+async function loadWiki() {
+  try {
+    const [br, cr, pr, hr] = await Promise.all([
+      fetch('/api/wiki/books').then(r => r.json()),
+      fetch('/api/wiki/concepts').then(r => r.json()),
+      fetch('/api/wiki/papers').then(r => r.json()),
+      fetch('/api/wiki/huatai').then(r => r.json()),
+    ]);
+
+    const books = br.books || [], concepts = cr.concepts || [],
+          papers = pr.papers || [], huatai = hr.huatai_series || [];
+
+    let html = '<div class="summary-grid">';
+    html += `<a href="/detail/wiki" class="summary-stat">
+      <span class="summary-stat-num">${books.length}</span>
+      <span class="summary-stat-label">📖 书籍</span></a>`;
+    html += `<a href="/detail/wiki" class="summary-stat">
+      <span class="summary-stat-num">${concepts.length}</span>
+      <span class="summary-stat-label">💡 概念</span></a>`;
+    html += `<a href="/detail/wiki" class="summary-stat">
+      <span class="summary-stat-num">${papers.length}</span>
+      <span class="summary-stat-label">📄 论文</span></a>`;
+    html += `<a href="/detail/wiki" class="summary-stat">
+      <span class="summary-stat-num">${huatai.length}</span>
+      <span class="summary-stat-label">🏦 华泰系列</span></a>`;
+    html += '</div>';
+
+    // 最近更新的书名
+    if (books.length > 0) {
+      html += '<div style="margin-top:12px;font-size:11px;color:var(--fg-muted);">';
+      html += '📚 ' + books.slice(0,3).map(b => b.name).join(' · ');
+      if (books.length > 3) html += ` 等${books.length}本`;
+      html += '</div>';
+    }
+
+    document.getElementById('wiki-preview').innerHTML = html;
+  } catch(e) { console.error(e); }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// 执行状态 — 卡片内 + 检测面板
+// ═══════════════════════════════════════════════════════════════
+let _execData = {};
+
+async function loadExecStatus() {
+  try {
+    const r = await fetch('/api/execution-status').then(r => r.json());
+    _execData = r;
+    updateCardStatus('jobs', r.jobs);
+    updateCardStatus('stocks', r.stocks);
+    updateCheckPanel();
+  } catch(e) { console.error(e); }
+}
+
+function updateCardStatus(type, info) {
+  const el = document.getElementById(`${type}-card-status`);
+  if (!el) return;
+  const dot = el.querySelector('.cs-dot');
+  const text = el.querySelector('.cs-text');
+  if (!info.done) {
+    dot.className = 'cs-dot cs-pending';
+    text.textContent = '等待执行';
+    el.title = '点击检测面板执行';
+  } else {
+    const t = info.at ? info.at.slice(11,16) : '';
+    const ex = info.duration_sec ? `/${info.duration_sec}s` : '';
+    dot.className = 'cs-dot cs-done';
+    text.textContent = `${t}${ex}`;
+    el.title = `已完成于 ${t}`;
+  }
+}
+
+function updateCheckPanel() {
+  const panel = document.getElementById('check-panel');
+  const dot = document.getElementById('check-dot');
+  const d = _execData;
+
+  // 总体状态
+  const allDone = (d.jobs?.done) && (d.stocks?.done);
+  const anyPending = !d.jobs?.done || !d.stocks?.done;
+  if (allDone) dot.className = 'check-dot check-all-ok';
+  else if (anyPending) dot.className = 'check-dot check-some-pending';
+
+  const items = [
+    { id: 'jobs', name: '社招监控', icon: '💼', info: d.jobs, hasTrigger: true },
+    { id: 'stocks', name: 'A股数据', icon: '📈', info: d.stocks, hasTrigger: true },
+    { id: 'wiki', name: '读书笔记', icon: '📚', info: null, hasTrigger: false },
+  ];
+
+  panel.innerHTML = items.map(item => {
+    const info = item.info;
+    let statusHtml, actionHtml = '';
+    if (item.id === 'wiki') {
+      statusHtml = '<span class="cp-status-ok">静态数据</span>';
+    } else if (!info?.done) {
+      statusHtml = '<span class="cp-status-pending">⚠ 未执行</span>';
+      actionHtml = `<button class="cp-trigger-btn" onclick="triggerModule('${item.id}')">▶ 执行</button>`;
+    } else {
+      const t = info.at ? info.at.slice(11,16) : '';
+      const ex = info.duration_sec ? ` · ${info.duration_sec}s` : '';
+      statusHtml = `<span class="cp-status-done">✅ ${t} 完成${ex}</span>`;
+    }
+    return `<div class="cp-item">
+      <span class="cp-icon">${item.icon}</span>
+      <span class="cp-name">${item.name}</span>
+      <span class="cp-status">${statusHtml}</span>
+      ${actionHtml}
+    </div>`;
+  }).join('');
+}
+
+function toggleCheckPanel() {
+  const panel = document.getElementById('check-panel');
+  panel.classList.toggle('open');
+}
+// 点击外部关闭
+document.addEventListener('click', function(e) {
+  const dd = document.getElementById('check-dropdown');
+  if (dd && !dd.contains(e.target)) {
+    document.getElementById('check-panel').classList.remove('open');
+  }
+});
+
+let _pollTimer = null;
+function pollExecStatus(type) {
+  if (_pollTimer) clearInterval(_pollTimer);
+  _pollTimer = setInterval(async () => {
+    const r = await fetch('/api/execution-status').then(r => r.json());
+    _execData = r;
+    updateCardStatus('jobs', r.jobs);
+    updateCardStatus('stocks', r.stocks);
+    updateCheckPanel();
+    if (r.jobs.done && r.stocks.done) { clearInterval(_pollTimer); _pollTimer = null; loadAll(); }
+  }, 3000);
+}
+async function triggerModule(type) {
+  if (type === 'jobs') await triggerJobs();
+  else if (type === 'stocks') await triggerStocks();
+  document.getElementById('check-panel').classList.remove('open');
+}
+async function triggerJobs() {
+  const r = await fetch('/api/trigger/jobs', { method: 'POST' }).then(r => r.json());
+  if (r.ok) pollExecStatus('jobs'); else alert(r.message);
+}
+async function triggerStocks() {
+  const r = await fetch('/api/trigger/stocks', { method: 'POST' }).then(r => r.json());
+  if (r.ok) pollExecStatus('stocks'); else alert(r.message);
+}
+
+// ═══ 启动 ═══
+init();
+</script>
+</body>
+</html>

@@ -1,0 +1,395 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>{{ title }} · 仪表盘</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body class="detail-page">
+
+<!-- ═══ 顶栏 · 详情页一体化 ═══ -->
+<header class="detail-top">
+  <div class="header-left">
+    <a href="/" class="detail-back" title="返回仪表盘">←</a>
+    <div class="detail-title-group">
+      <h1 class="detail-title">{{ title }}</h1>
+      <p class="detail-subtitle" id="detail-meta"></p>
+    </div>
+  </div>
+  <div class="header-right">
+    <span class="config-toggle" onclick="toggleConfig()">⚙ 配置</span>
+    <button id="theme-toggle" title="切换主题" onclick="toggleTheme()">
+      <span class="icon-sun">☀️</span>
+      <span class="icon-moon">🌙</span>
+    </button>
+  </div>
+</header>
+
+<!-- ═══ 配置信息面板 ═══ -->
+<div class="config-panel" id="config-panel"></div>
+
+<!-- ═══ 内容区 ═══ -->
+<div id="detail-content">
+  <div class="skeleton skeleton-num"></div>
+  <div class="skeleton skeleton-text"></div>
+  <div class="skeleton skeleton-text long"></div>
+  <div class="skeleton skeleton-text short"></div>
+</div>
+
+<script>
+// ═══════════════════════════════════════════════════════════════
+// 主题
+// ═══════════════════════════════════════════════════════════════
+function toggleTheme() {
+  const html = document.documentElement;
+  const current = html.getAttribute('data-theme');
+  const next = current === 'light' ? null : 'light';
+  if (next) html.setAttribute('data-theme', next);
+  else html.removeAttribute('data-theme');
+  localStorage.setItem('dashboard-theme', next || 'dark');
+}
+(function() {
+  const saved = localStorage.getItem('dashboard-theme');
+  if (saved === 'dark') document.documentElement.removeAttribute('data-theme');
+  else document.documentElement.setAttribute('data-theme', 'light');
+})();
+
+// ═══════════════════════════════════════════════════════════════
+// 模块路由
+// ═══════════════════════════════════════════════════════════════
+const MODULE = '{{ module }}';
+const today = new Date().toISOString().slice(0, 10);
+
+async function init() {
+  document.getElementById('detail-meta').textContent = '日期: ' + today;
+  renderConfig();
+  switch (MODULE) {
+    case 'jobs': await loadJobsDetail(); break;
+    case 'stocks': await loadStocksDetail(); break;
+    case 'wiki': await loadWikiDetail(); break;
+  }
+}
+
+function toggleConfig() {
+  const panel = document.getElementById('config-panel');
+  const toggle = document.querySelector('.config-toggle');
+  panel.classList.toggle('open');
+  toggle.classList.toggle('active');
+}
+
+function renderConfig() {
+  const configs = {
+    jobs: {
+      icon: '💼',
+      items: [
+        ['数据源', 'data/seen_jobs.json', 'JSON 文件，key=岗位ID，含 title/link/score/tag/emails/deadline/first_seen'],
+        ['级别标签', '🔥 高度匹配 / ⭐ 推荐关注 / 💡 可以看看 / 📋 一般岗位', ''],
+        ['采集脚本', '~/Documents/searchjob/monitor.py', 'Python 脚本，抓取招聘信息写入 seen_jobs.json'],
+        ['日报输出', '~/Documents/searchjob/output/YYYY-MM-DD.md', '每日采集后生成 Markdown 日报'],
+        ['执行触发', 'venv/bin/python3 monitor.py --quiet', '通过 Flask API 触发，锁文件防止 2min 内重复'],
+        ['检测逻辑', '检查当天 output/*.md 是否存在', ''],
+      ]
+    },
+    stocks: {
+      icon: '📈',
+      items: [
+        ['数据库', '~/.tradingagents/data/quant.db', 'SQLite，由 a-stock-data 技能写入'],
+        ['核心表', 'daily_valuation / daily_bars / stocks', '个股估值+行情+基础信息'],
+        ['行业表', 'daily_industry', 'name/change_pct/leader/net_inflow_yi...'],
+        ['北向表', 'daily_northbound', 'hgt_cum（沪股通）/ sgt_cum（深股通）'],
+        ['龙虎榜表', 'daily_dragon_tiger', 'code/name/reason/net_buy_wan...'],
+        ['强势股表', 'daily_hot_stocks', 'code/name/reason_tags/change_pct...'],
+        ['采集日志', 'collection_log', 'is_trading_day/errors/duration_sec...'],
+        ['采集方式', 'Claude CLI + a-stock-data 技能', '通过 Claude 调用 mootdx 等数据源采集'],
+        ['执行触发', 'claude -p "使用a-stock-data技能收集..."', '通过 Flask API 触发，锁文件防止 5min 内重复'],
+        ['检测逻辑', '查 collection_log 当天记录是否存在', ''],
+      ]
+    },
+    wiki: {
+      icon: '📚',
+      items: [
+        ['根目录', '~/Documents/mywiki/wiki/', '环境变量 WIKI_PATH 可覆盖'],
+        ['书籍', 'wiki/书籍/{书名}/*.md + *.html', '子目录=书，.md=章节(数字前缀排序)，.html=笔记'],
+        ['概念', 'wiki/概念/概念-XXX.md', '文件名格式 概念-名称.md, 自动去掉前缀显示'],
+        ['论文', 'wiki/论文/*.html / *.md', '.html 标记 [HTML] 徽章'],
+        ['华泰金工', 'wiki/华泰金工AI系列/第XX期-....md', '按文件名数字排序，.html=系列笔记'],
+        ['忽略项', '.DS_Store / .obsidian / .trash / .git', '扫描时自动跳过'],
+        ['Wiki 查看', '/wiki/view?path=相对路径', '路径穿越保护 + Markdown→HTML 渲染'],
+        ['数据刷新', '每次请求实时扫描文件系统', '无缓存，文件变更即时生效'],
+      ]
+    }
+  };
+
+  const cfg = configs[MODULE];
+  if (!cfg) return;
+
+  let html = `<div class="config-card">
+    <div class="config-card-header">${cfg.icon} ${cfg.items.length} 项配置</div>
+    <table class="config-table">
+      <thead><tr><th>配置项</th><th>值</th><th>说明</th></tr></thead><tbody>`;
+  cfg.items.forEach(([key, val, note]) => {
+    html += `<tr><td class="cfg-key">${key}</td><td class="cfg-val">${val}</td><td class="cfg-note">${note}</td></tr>`;
+  });
+  html += '</tbody></table></div>';
+  document.getElementById('config-panel').innerHTML = html;
+}
+
+// ═══════════════════════════════════════════════════════════════
+// 社招详情
+// ═══════════════════════════════════════════════════════════════
+async function loadJobsDetail() {
+  try {
+    const r = await fetch(`/api/jobs?date=${today}`).then(r => r.json());
+    document.getElementById('detail-meta').textContent =
+      `日期: ${r.date} · 共 ${r.count} 个岗位`;
+
+    if (!r.jobs || r.jobs.length === 0) {
+      document.getElementById('detail-content').innerHTML =
+        '<div class="detail-card"><div class="detail-card-body"><div class="empty-state"><span class="empty-icon">📭</span>暂无岗位数据</div></div></div>';
+      return;
+    }
+
+    const tagOrder = ['🔥 高度匹配', '⭐ 推荐关注', '💡 可以看看', '📋 一般岗位'];
+    const byTag = {};
+    r.jobs.forEach(j => {
+      const tag = j.tag || '📋 一般岗位';
+      if (!byTag[tag]) byTag[tag] = [];
+      byTag[tag].push(j);
+    });
+
+    let html = '';
+    tagOrder.forEach(tag => {
+      const jobs = byTag[tag];
+      if (!jobs || jobs.length === 0) return;
+      const tagClass = tag.includes('🔥') ? 'td-tag-fire' :
+                       tag.includes('⭐') ? 'td-tag-star' :
+                       tag.includes('💡') ? 'td-tag-light' : 'td-tag-general';
+      html += `<div class="detail-card">
+        <div class="detail-card-header">${tag} · ${jobs.length} 个</div>
+        <div class="detail-card-body" style="padding:0;overflow-x:auto;">
+          <table class="job-table">
+            <thead><tr>
+              <th>岗位名称</th><th>来源</th><th>匹配分</th><th>截止</th><th>邮箱</th>
+            </tr></thead>
+            <tbody>`;
+      jobs.forEach(j => {
+        const dl = j.deadline || '-';
+        const email = j.emails && j.emails.length > 0 ? j.emails.join(', ') : '-';
+        html += `<tr>
+          <td><a href="${j.link}" target="_blank" rel="noopener">${j.title}</a></td>
+          <td>${j.source}</td>
+          <td><span class="text-mono">${j.score}</span></td>
+          <td>${dl}</td>
+          <td style="font-size:11px;color:var(--fg-muted);">${email}</td>
+        </tr>`;
+      });
+      html += '</tbody></table></div></div>';
+    });
+
+    document.getElementById('detail-content').innerHTML = html;
+  } catch(e) { console.error(e); }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// A股详情
+// ═══════════════════════════════════════════════════════════════
+async function loadStocksDetail() {
+  try {
+    const [mr, sr, nr, dr, hr] = await Promise.all([
+      fetch(`/api/stocks/summary?date=${today}`).then(r => r.json()),
+      fetch(`/api/stocks/sectors?date=${today}`).then(r => r.json()),
+      fetch(`/api/stocks/northbound?date=${today}`).then(r => r.json()),
+      fetch(`/api/stocks/dragon-tiger?date=${today}`).then(r => r.json()),
+      fetch(`/api/stocks/hot?date=${today}`).then(r => r.json()),
+    ]);
+
+    let html = '';
+
+    // ── 大盘概览 ──
+    if (!mr.error && mr.summary) {
+      const s = mr.summary;
+      html += '<div class="detail-card"><div class="detail-card-header">📈 大盘概览</div><div class="detail-card-body">';
+      const total = s.up_count + s.down_count + s.flat_count;
+      if (total > 0) {
+        const upPct = (s.up_count / total * 100).toFixed(1);
+        const downPct = (s.down_count / total * 100).toFixed(1);
+        html += `<div class="market-breadth">
+          <div class="breadth-bar">
+            <div class="breadth-up" style="width:${upPct}%">${s.up_count} ↑</div>
+            <div class="breadth-down" style="width:${downPct}%">${s.down_count} ↓</div>
+          </div>
+          <div class="breadth-info">
+            成交 ${s.total_amount_yi}亿 · 涨停 ${s.total_limit_up||0} · 跌停 ${s.total_limit_down||0}
+          </div></div>`;
+      }
+      if (s.indices && s.indices.length > 0) {
+        html += '<div class="index-row">';
+        s.indices.forEach(idx => {
+          const cls = idx.avg_change_pct >= 0 ? 'up' : 'down';
+          html += `<div class="index-card ${cls}">
+            <div class="index-name">${idx.name}</div>
+            <div class="index-chg ${cls}">${idx.avg_change_pct >= 0 ? '+' : ''}${idx.avg_change_pct}%</div>
+            <div class="index-sub">涨${idx.up} 跌${idx.down} ${idx.amount_yi}亿</div></div>`;
+        });
+        html += '</div>';
+      }
+      html += '</div></div>';
+    }
+
+    // ── 行业板块 ──
+    if (!sr.error && sr.sectors && sr.sectors.length > 0) {
+      html += `<div class="detail-card"><div class="detail-card-header">🏭 行业板块 · 全部 ${sr.sectors.length} 个</div><div class="detail-card-body" style="padding:0;overflow-x:auto;">
+        <table class="job-table"><thead><tr><th>#</th><th>行业</th><th>涨跌幅</th><th>成交额</th><th>净流入</th><th>涨/跌</th><th>龙头</th></tr></thead><tbody>`;
+      sr.sectors.forEach((s, i) => {
+        const cls = s.change_pct >= 0 ? 'up' : 'down';
+        html += `<tr>
+          <td>${i+1}</td><td style="font-weight:600;">${s.name}</td>
+          <td class="${cls}">${s.change_pct >= 0 ? '+' : ''}${s.change_pct}%</td>
+          <td>${s.turnover_yi}亿</td><td>${s.net_inflow_yi}亿</td>
+          <td>涨${s.up||0}/跌${s.down||0}</td><td>${s.leader||'-'}</td></tr>`;
+      });
+      html += '</tbody></table></div></div>';
+    }
+
+    // ── 北向资金 ──
+    if (!nr.error && nr.northbound) {
+      const nb = nr.northbound;
+      const cls = nb.total_yi >= 0 ? 'up' : 'down';
+      html += `<div class="detail-card"><div class="detail-card-header">💰 北向资金</div><div class="detail-card-body">
+        <div class="nb-card">
+          <div class="nb-total ${cls}">${nb.total_yi >= 0 ? '+' : ''}${nb.total_yi} 亿</div>
+          <div class="nb-detail">沪股通 ${nb.hgt_yi}亿 · 深股通 ${nb.sgt_yi}亿</div></div></div></div>`;
+    }
+
+    // ── 龙虎榜 ──
+    if (!dr.error && dr.dragon_tiger && dr.dragon_tiger.length > 0) {
+      html += `<div class="detail-card"><div class="detail-card-header">🐉 龙虎榜 · ${dr.dragon_tiger.length} 条</div><div class="detail-card-body">`;
+      dr.dragon_tiger.forEach(dt => {
+        const cls = dt.change_pct >= 0 ? 'up' : 'down';
+        html += `<div class="dt-item">
+          <span class="dt-name">${dt.name}</span><span class="dt-code">${dt.code}</span>
+          <span class="dt-pct ${cls}">${dt.change_pct >= 0 ? '+' : ''}${dt.change_pct}%</span>
+          <span class="text-mono text-muted">净${dt.net_buy_wan >= 0 ? '+' : ''}${(dt.net_buy_wan/10000).toFixed(2)}亿</span>
+          <div class="dt-reason">${dt.reason}</div></div>`;
+      });
+      html += '</div></div>';
+    }
+
+    // ── 强势股 ──
+    if (!hr.error && hr.hot_stocks && hr.hot_stocks.length > 0) {
+      html += `<div class="detail-card"><div class="detail-card-header">⚡ 强势股 · ${hr.hot_stocks.length} 条</div><div class="detail-card-body">`;
+      hr.hot_stocks.forEach(h => {
+        const cls = h.change_pct >= 0 ? 'up' : 'down';
+        html += `<div class="hot-item">
+          <span class="hot-name">${h.name}</span><span class="dt-code">${h.code}</span>
+          <span class="hot-pct ${cls}">${h.change_pct >= 0 ? '+' : ''}${h.change_pct}%</span>
+          ${h.tags ? `<span class="hot-tags">${h.tags}</span>` : ''}</div>`;
+      });
+      html += '</div></div>';
+    }
+
+    if (!html) {
+      html = '<div class="detail-card"><div class="detail-card-body"><div class="empty-state"><span class="empty-icon">📊</span>当日无A股数据</div></div></div>';
+    }
+    document.getElementById('detail-content').innerHTML = html;
+  } catch(e) { console.error(e); }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// 读书笔记详情
+// ═══════════════════════════════════════════════════════════════
+async function loadWikiDetail() {
+  try {
+    const [br, cr, pr, hr] = await Promise.all([
+      fetch('/api/wiki/books').then(r => r.json()),
+      fetch('/api/wiki/concepts').then(r => r.json()),
+      fetch('/api/wiki/papers').then(r => r.json()),
+      fetch('/api/wiki/huatai').then(r => r.json()),
+    ]);
+
+    let html = '';
+
+    // ── 书籍 ──
+    const books = br.books || [];
+    if (books.length > 0) {
+      html += `<div class="detail-card"><div class="detail-card-header">📖 书籍 · ${books.length} 本</div><div class="detail-card-body">`;
+      books.forEach((book, i) => {
+        const bid = `dbook-${i}`;
+        html += `<div class="wiki-book expanded" id="${bid}-container">
+          <div class="wiki-book-header" onclick="toggleBookD('${bid}')">
+            <span class="wiki-book-name">${book.name}</span>
+            <span class="wiki-book-arrow">▼</span></div>
+          <div class="wiki-chapters">`;
+        (book.chapters||[]).forEach(ch => {
+          html += `<div class="wiki-chapter-item"><a href="/wiki/view?path=${encodeURIComponent(ch.file)}" target="_blank">📄 ${ch.title}</a></div>`;
+        });
+        if (book.notes_html) {
+          html += `<a class="wiki-notes-link" href="/wiki/view?path=${encodeURIComponent(book.notes_html)}" target="_blank">📝 阅读笔记</a>`;
+        }
+        html += '</div></div>';
+      });
+      html += '</div></div>';
+    }
+
+    // ── 概念 ──
+    const concepts = cr.concepts || [];
+    if (concepts.length > 0) {
+      html += `<div class="detail-card"><div class="detail-card-header">💡 概念 · ${concepts.length} 个</div><div class="detail-card-body">`;
+      concepts.forEach(c => {
+        html += `<div class="wiki-concept-item"><a href="/wiki/view?path=${encodeURIComponent(c.file)}" target="_blank">${c.name}</a></div>`;
+      });
+      html += '</div></div>';
+    }
+
+    // ── 论文 ──
+    const papers = pr.papers || [];
+    if (papers.length > 0) {
+      html += `<div class="detail-card"><div class="detail-card-header">📄 论文 · ${papers.length} 篇</div><div class="detail-card-body">`;
+      papers.forEach(p => {
+        const badge = p.file.endsWith('.html') ? '<span class="wiki-paper-badge">HTML</span>' : '';
+        html += `<div class="wiki-paper-item"><a href="/wiki/view?path=${encodeURIComponent(p.file)}" target="_blank">${p.name}</a>${badge}</div>`;
+      });
+      html += '</div></div>';
+    }
+
+    // ── 华泰金工 ──
+    const huatai = hr.huatai_series || [];
+    if (huatai.length > 0) {
+      html += `<div class="detail-card"><div class="detail-card-header">🏦 华泰金工AI系列 · ${huatai.length} 期</div><div class="detail-card-body">
+        <div class="wiki-huatai-list">`;
+      huatai.forEach(s => {
+        html += `<div class="wiki-huatai-item"><a href="/wiki/view?path=${encodeURIComponent(s.file)}" target="_blank">${s.name}</a></div>`;
+      });
+      html += '</div></div></div>';
+    }
+
+    if (!html) {
+      html = '<div class="detail-card"><div class="detail-card-body"><div class="empty-state"><span class="empty-icon">📚</span>暂无数据</div></div></div>';
+    }
+    document.getElementById('detail-content').innerHTML = html;
+  } catch(e) { console.error(e); }
+}
+
+function toggleBookD(bid) {
+  const container = document.getElementById(bid + '-container');
+  if (!container) return;
+  const isExpanded = container.classList.contains('expanded');
+  if (isExpanded) {
+    container.classList.remove('expanded');
+    const arrow = container.querySelector('.wiki-book-arrow');
+    if (arrow) arrow.textContent = '▶';
+  } else {
+    container.classList.add('expanded');
+    const arrow = container.querySelector('.wiki-book-arrow');
+    if (arrow) arrow.textContent = '▼';
+  }
+}
+
+init();
+</script>
+</body>
+</html>
