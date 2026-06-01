@@ -5,7 +5,7 @@ import subprocess
 from datetime import date, datetime
 from pathlib import Path
 
-from flask import Blueprint, render_template, jsonify, request
+from flask import Blueprint, render_template, jsonify, request, send_file, abort
 
 from data.jobs import get_jobs_by_date, get_job_dates, get_job_summary
 from data.stocks import (
@@ -14,6 +14,14 @@ from data.stocks import (
     get_dragon_tiger, get_hot_stocks, get_collection_status,
 )
 from data.wiki import scan_wiki, get_file_content, WIKI_ROOT
+from data.family import (
+    get_all as family_get_all, add as family_add, update as family_update,
+    delete as family_delete,
+    delete_item as family_delete_item, delete_group as family_delete_group,
+    rename_group as family_rename_group, rename_item as family_rename_item,
+    get_groups as family_get_groups, get_items as family_get_items,
+    get_file_info,
+)
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 OUTPUT_DIR = BASE_DIR / "output"
@@ -37,7 +45,7 @@ def index():
 @pages.route("/detail/<module>")
 def detail(module):
     """详情页：jobs / stocks / wiki"""
-    valid = {"jobs": "社招监控", "stocks": "A股市场", "wiki": "读书笔记"}
+    valid = {"jobs": "社招监控", "stocks": "A股市场", "wiki": "读书笔记", "family": "家庭资料"}
     if module not in valid:
         return "Not found", 404
     return render_template("detail.html", module=module, title=valid[module])
@@ -350,3 +358,173 @@ def api_trigger_stocks():
         return jsonify({"ok": False, "message": f"启动失败: {e}"}), 500
 
     return jsonify({"ok": True, "message": "已触发执行（约需2-3分钟）"})
+
+
+# ── API: 家庭资料 ──────────────────────────────────────────
+
+@api.route("/family/documents")
+def api_family_docs():
+    return jsonify(family_get_all())
+
+
+@api.route("/family/documents", methods=["POST"])
+def api_family_add():
+    body = request.get_json(force=True) or {}
+    group = body.get("group", "").strip()
+    item = body.get("item", "").strip()
+    category = body.get("category", "").strip()
+    file_path = body.get("file_path", "").strip()
+    if not group:
+        return jsonify({"ok": False, "message": "大类不能为空"}), 400
+    if not item:
+        return jsonify({"ok": False, "message": "子项不能为空"}), 400
+    if not file_path:
+        return jsonify({"ok": False, "message": "文件路径不能为空"}), 400
+    doc = family_add(group, item, category, file_path)
+    return jsonify({"ok": True, "doc": doc})
+
+
+@api.route("/family/documents/<doc_id>", methods=["PUT"])
+def api_family_update(doc_id):
+    body = request.get_json(force=True) or {}
+    doc = family_update(
+        doc_id,
+        group=body.get("group"),
+        item=body.get("item"),
+        category=body.get("category"),
+        file_path=body.get("file_path"),
+    )
+    if doc is None:
+        return jsonify({"ok": False, "message": "资料不存在"}), 404
+    return jsonify({"ok": True, "doc": doc})
+
+
+@api.route("/family/documents/<doc_id>", methods=["DELETE"])
+def api_family_delete(doc_id):
+    ok = family_delete(doc_id)
+    if not ok:
+        return jsonify({"ok": False, "message": "资料不存在"}), 404
+    return jsonify({"ok": True})
+
+
+@api.route("/family/groups")
+def api_family_groups():
+    return jsonify({"groups": family_get_groups()})
+
+
+@api.route("/family/groups/<group>/items")
+def api_family_items(group):
+    return jsonify({"group": group, "items": family_get_items(group)})
+
+
+@api.route("/family/groups/<group>", methods=["PUT"])
+def api_family_rename_group(group):
+    body = request.get_json(force=True) or {}
+    new_name = body.get("name", "").strip()
+    if not new_name:
+        return jsonify({"ok": False, "message": "新名称不能为空"}), 400
+    count = family_rename_group(group, new_name)
+    return jsonify({"ok": True, "updated": count})
+
+
+@api.route("/family/groups/<group>", methods=["DELETE"])
+def api_family_delete_group(group):
+    count = family_delete_group(group)
+    return jsonify({"ok": True, "removed": count})
+
+
+@api.route("/family/groups/<group>/items/<item>", methods=["PUT"])
+def api_family_rename_item(group, item):
+    body = request.get_json(force=True) or {}
+    new_name = body.get("name", "").strip()
+    if not new_name:
+        return jsonify({"ok": False, "message": "新名称不能为空"}), 400
+    count = family_rename_item(group, item, new_name)
+    return jsonify({"ok": True, "updated": count})
+
+
+@api.route("/family/groups/<group>/items/<item>", methods=["DELETE"])
+def api_family_delete_item(group, item):
+    count = family_delete_item(group, item)
+    return jsonify({"ok": True, "removed": count})
+
+
+@api.route("/family/config")
+def api_family_config():
+    """返回 family_docs.json 的原始内容（用于在线编辑）"""
+    import json
+    from data.family import STORE
+    try:
+        if STORE.exists():
+            content = STORE.read_text(encoding="utf-8")
+        else:
+            content = json.dumps({"config": {"groups": ["人员","房产","车辆"]}, "documents": []}, ensure_ascii=False, indent=2)
+        return jsonify({"ok": True, "content": content})
+    except Exception as e:
+        return jsonify({"ok": False, "message": str(e)}), 500
+
+
+@api.route("/family/config", methods=["PUT"])
+def api_family_config_save():
+    """保存 family_docs.json 原始内容"""
+    import json, os
+    from data.family import STORE
+    body = request.get_json(force=True) or {}
+    raw = body.get("content", "")
+    if not raw.strip():
+        return jsonify({"ok": False, "message": "内容不能为空"}), 400
+    try:
+        parsed = json.loads(raw)
+        # 支持新格式 {config, documents} 或旧格式 [...]
+        if isinstance(parsed, list):
+            parsed = {"config": {"groups": ["人员","房产","车辆"]}, "documents": parsed}
+        if not isinstance(parsed, dict) or "documents" not in parsed:
+            return jsonify({"ok": False, "message": "JSON 格式错误：需要 {config, documents} 结构"}), 400
+        # 原子写入：先写 .tmp 再 rename
+        tmp = STORE.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(parsed, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(tmp, STORE)
+        return jsonify({"ok": True, "count": len(parsed.get("documents", []))})
+    except json.JSONDecodeError as e:
+        return jsonify({"ok": False, "message": f"JSON 格式错误: {e}"}), 400
+    except Exception as e:
+        return jsonify({"ok": False, "message": str(e)}), 500
+
+
+@api.route("/family/preview")
+def api_family_preview():
+    """返回文件预览信息（不传输文件内容，只返回元信息）"""
+    rel = request.args.get("path", "")
+    if not rel:
+        return jsonify({"ok": False, "message": "缺少路径参数"}), 400
+    info = get_file_info(rel)
+    return jsonify({"ok": True, "info": info})
+
+
+@api.route("/family/file")
+def api_family_file():
+    """直接提供文件内容（图片/PDF等）"""
+    rel = request.args.get("path", "")
+    if not rel:
+        return "Missing path", 400
+
+    p = Path(rel).expanduser()
+    if not p.is_absolute():
+        p = Path.home() / rel
+
+    p = p.resolve()
+    if not p.exists() or not p.is_file():
+        abort(404)
+
+    # 安全检查：只允许常见文档/图片类型
+    allowed = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".svg",
+               ".pdf", ".doc", ".docx", ".xls", ".xlsx"}
+    if p.suffix.lower() not in allowed:
+        abort(403)
+
+    # 图片直接展示，PDF 等其他格式作为附件
+    image_types = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".svg"}
+    if p.suffix.lower() in image_types:
+        return send_file(str(p), mimetype=f"image/{p.suffix.lstrip('.').replace('jpg', 'jpeg')}")
+
+    return send_file(str(p), as_attachment=False)

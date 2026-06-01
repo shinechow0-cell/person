@@ -71,6 +71,7 @@ async function init() {
     case 'jobs': await loadJobsDetail(); break;
     case 'stocks': await loadStocksDetail(); break;
     case 'wiki': await loadWikiDetail(); break;
+    case 'family': await loadFamilyDetail(); break;
   }
 }
 
@@ -119,6 +120,16 @@ function renderConfig() {
         ['Wiki 查看', '/wiki/view?path=相对路径', '路径穿越保护 + Markdown→HTML'],
         ['数据刷新', '每次请求实时扫描文件系统', '无缓存，文件变更即时生效'],
       ]
+    },
+    family: {
+      icon: '\u{1f3e0}',
+      items: [
+        ['数据文件', 'data/family_docs.json', '{config: {groups: [...]}, documents: [...]}'],
+        ['文档字段', '{id, group, item, name, category, file_path, created_at}', 'name 自动取文件名'],
+        ['大类', 'config.groups 定义', '编辑 JSON 文件增删改'],
+        ['添加资料', '子项 + 分类 + 文件地址', '分类自由输入，group 来自按钮上下文'],
+        ['数据层级', '大类 → 子项 → 分类 → 文档', ''],
+      ]
     }
   };
 
@@ -132,7 +143,16 @@ function renderConfig() {
   cfg.items.forEach(([key, val, note]) => {
     html += `<tr><td class="cfg-key">${key}</td><td class="cfg-val">${val}</td><td class="cfg-note">${note}</td></tr>`;
   });
-  html += '</tbody></table></div>';
+  html += '</tbody></table>';
+
+  // family 模块附加编辑按钮
+  if (MODULE === 'family') {
+    html += `<div style="padding:var(--space-3) var(--space-4);border-top:1px solid var(--border-subtle);text-align:right;">
+      <button class="fam-module-btn" onclick="showConfigEditor()" style="border-color:var(--accent-3);color:var(--accent-3);">📝 编辑 JSON</button>
+    </div>`;
+  }
+
+  html += '</div>';
   document.getElementById('config-panel').innerHTML = html;
 }
 
@@ -408,6 +428,625 @@ function toggleBookD(bid) {
     if (arrow) arrow.textContent = '▼';
   }
 }
+
+// ═══════════════════════════════════════════════════════════════
+// 家庭资料详情（大类 → 子项 → 分类 → 文档 三层结构）
+// ═══════════════════════════════════════════════════════════════
+let _familyData = {};
+
+// 大类图标和颜色映射
+const GROUP_META = {
+  '人员': { icon:'👤', color:'var(--accent-3)', bg:'rgba(59,130,246,0.06)' },
+  '房产': { icon:'🏠', color:'var(--accent)', bg:'rgba(34,197,94,0.05)' },
+  '车辆': { icon:'🚗', color:'var(--accent-2)', bg:'rgba(245,158,11,0.05)' },
+};
+function groupMeta(group) { return GROUP_META[group] || { icon:'📂', color:'var(--fg-muted)', bg:'var(--bg-surface)' }; }
+
+async function loadFamilyDetail() {
+  try {
+    const r = await fetch('/api/family/documents').then(r => r.json());
+    _familyData = r;
+    const gc = r.groups ? r.groups.length : 0;
+    document.getElementById('detail-meta').textContent =
+      `${gc} 个大类 · ${r.total || 0} 份资料`;
+
+    if (r.is_default) {
+      const banner = document.createElement('div');
+      banner.className = 'fam-init-banner';
+      banner.innerHTML = r.initialized
+        ? `⚠️ 数据文件 <code>data/family_docs.json</code> 不存在，已自动创建 <span class="banner-dismiss">✕</span>`
+        : `⚠️ 还没有任何资料，点击顶栏 ⚙ 配置 → 📝 编辑 JSON 添加，或通过页面按钮添加 <span class="banner-dismiss">✕</span>`;
+      banner.querySelector('.banner-dismiss').addEventListener('click', (e) => { e.stopPropagation(); banner.remove(); });
+      banner.addEventListener('click', () => banner.remove());
+      document.getElementById('detail-content').before(banner);
+    }
+
+    renderFamilyDocs();
+  } catch(e) { console.error(e); }
+}
+
+function renderFamilyDocs() {
+  const d = _familyData;
+  let html = '';
+
+  // ── 顶部筛选栏 ──
+  html += `<div class="fam-filter-bar">
+    <span class="fam-filter-label">🔍 筛选</span>
+    <select id="fam-filter-group" class="fam-select" onchange="applyFamilyFilter()" style="min-width:120px;">
+      <option value="">全部大类</option>
+      ${(d.groups||[]).map(g => `<option value="${escAttr(g)}">${escHtml(g)}</option>`).join('')}
+    </select>
+    <select id="fam-filter-item" class="fam-select" onchange="applyFamilyFilter()" style="min-width:140px;">
+      <option value="">全部子项</option>
+    </select>
+    <select id="fam-filter-cat" class="fam-select" onchange="applyFamilyFilter()" style="min-width:120px;">
+      <option value="">全部分类</option>
+      ${(d.categories||[]).map(c => `<option value="${escAttr(c)}">${escHtml(c)}</option>`).join('')}
+    </select>
+    <span id="fam-filter-result" class="fam-filter-result"></span>
+  </div>`;
+
+  if (!d.groups || d.groups.length === 0) {
+    html += '<div class="detail-card"><div class="detail-card-body"><div class="empty-state"><span class="empty-icon">📁</span>暂无资料，点击上方按钮添加</div></div></div>';
+    document.getElementById('detail-content').innerHTML = html;
+    return;
+  }
+
+  // ── 大类模块卡片 ──
+  d.groups.forEach((group, gi) => {
+    const items = (d.items_by_group && d.items_by_group[group]) ? d.items_by_group[group] : [];
+    const meta = groupMeta(group);
+    // 计算该大类下总文档数
+    let groupTotal = 0;
+    items.forEach(item => {
+      const idocs = (d.documents[group] && d.documents[group][item]) ? d.documents[group][item] : {};
+      groupTotal += Object.values(idocs).reduce((s, arr) => s + (Array.isArray(arr)?arr.length:0), 0);
+    });
+
+    html += `<div class="fam-module" data-group="${escAttr(group)}" style="--mod-color:${meta.color};--mod-bg:${meta.bg};">
+      <div class="fam-module-header">
+        <div class="fam-module-title">
+          <span class="fam-module-icon">${meta.icon}</span>
+          <div class="fam-module-text">
+            <span class="fam-module-name">${escHtml(group)}</span>
+            <span class="fam-module-stat">${items.length} 个子项 · ${groupTotal} 份资料</span>
+          </div>
+        </div>
+        <div class="fam-module-actions">
+          <button class="fam-module-btn" onclick="showFamilyForm(null,'${escAttr(group)}','','')" title="在此大类下添加资料">➕ 添加</button>
+          <button class="fam-action-btn fam-edit-btn" onclick="renameFamilyGroup('${escAttr(group)}')" title="重命名">✏️</button>
+          <button class="fam-action-btn fam-del-btn" onclick="deleteFamilyGroup('${escAttr(group)}')" title="删除">🗑</button>
+        </div>
+      </div>
+      <div class="fam-module-body">`;
+
+    if (items.length === 0) {
+      html += `<div class="fam-empty-module">
+        <span class="empty-icon">📭</span><p>暂无子项</p>
+        <button class="fam-module-btn" onclick="showFamilyGroupForm()">+ 新增子项</button>
+      </div>`;
+    } else {
+      html += '<div class="fam-item-grid">';
+      items.forEach(item => {
+        const itemDocs = (d.documents[group] && d.documents[group][item]) ? d.documents[group][item] : {};
+        const cats = Object.keys(itemDocs).filter(c => itemDocs[c] && itemDocs[c].length > 0);
+        const itemTotal = cats.reduce((s, c) => s + itemDocs[c].length, 0);
+
+        html += `<div class="fam-item-card" data-item="${escAttr(item)}">
+          <div class="fam-item-card-header">
+            <span class="fam-item-avatar">${meta.icon}</span>
+            <span class="fam-item-card-name">${escHtml(item)}</span>
+            <span class="fam-item-card-count">${itemTotal} 份</span>
+            <div class="fam-item-actions">
+              <button class="fam-action-btn fam-edit-btn" onclick="renameFamilyItem('${escAttr(group)}','${escAttr(item)}')" title="重命名">✏️</button>
+              <button class="fam-action-btn fam-del-btn" onclick="deleteFamilyItem('${escAttr(group)}','${escAttr(item)}')" title="删除">🗑</button>
+            </div>
+          </div>`;
+
+        if (cats.length === 0) {
+          html += '<div class="fam-item-card-body"><div class="empty-state" style="padding:10px;font-size:11px;">暂无资料</div></div>';
+        } else {
+          const CAT_ORDER = ['身份证', '学历证书', '户口本', '结婚证', '房产证', '护照', '行驶证', '驾驶证'];
+          const orderedCats = [...new Set([...CAT_ORDER.filter(c => cats.includes(c)), ...cats.filter(c => !CAT_ORDER.includes(c))])];
+
+          html += '<div class="fam-item-card-body">';
+          orderedCats.forEach(cat => {
+            if (!itemDocs[cat] || !itemDocs[cat].length) return;
+            const docs = itemDocs[cat];
+            html += `<div class="fam-cat-group">
+              <div class="fam-cat-header">
+                <span>📌 ${escHtml(cat)}</span><span class="fam-cat-num">${docs.length}</span>
+                <button class="fam-cat-add-btn" onclick="showFamilyForm(null,'${escAttr(group)}','${escAttr(item)}','${escAttr(cat)}')" title="添加">+</button>
+              </div>`;
+
+            docs.forEach(doc => {
+              const info = doc._fileInfo;
+              const hasPreview = info && info.exists && (info.is_image || info.is_pdf);
+              const sizeStr = info && info.size ? formatFileSize(info.size) : '';
+              html += `<div class="fam-doc-row" id="fam-doc-${doc.id}" data-category="${escAttr(doc.category)}">
+                <span class="fam-doc-icon">${info && info.is_image ? '🖼️' : info && info.is_pdf ? '📕' : '📄'}</span>
+                <span class="fam-doc-name">${escHtml(doc.name)}</span>
+                <span class="fam-doc-path">${escHtml(doc.file_path)}</span>
+                ${sizeStr ? `<span class="fam-doc-size">${sizeStr}</span>` : ''}
+                ${info && !info.exists ? '<span class="fam-doc-missing">⚠ 文件不存在</span>' : ''}
+                <span class="fam-doc-actions">
+                  ${hasPreview ? `<button class="fam-action-btn fam-preview-btn" onclick="previewFamilyFile('${escAttr(doc.file_path)}')" title="预览">👁</button>` : ''}
+                  <button class="fam-action-btn fam-edit-btn" onclick="showFamilyForm('${doc.id}')" title="编辑">✏️</button>
+                  <button class="fam-action-btn fam-del-btn" onclick="deleteFamilyDoc('${doc.id}')" title="删除">🗑</button>
+                </span>
+              </div>`;
+            });
+
+            html += '</div>';
+          });
+
+          html += '</div>'; // /fam-item-card-body
+        }
+
+        html += '</div>'; // /fam-item-card
+      });
+      html += '</div>'; // /fam-item-grid
+    }
+
+    html += '</div></div>'; // /fam-module-body & /fam-module
+  });
+
+  document.getElementById('detail-content').innerHTML = html;
+  loadFamilyFileInfo();
+  // 应用当前筛选
+  applyFamilyFilter();
+}
+
+function applyFamilyFilter() {
+  const gFilter = document.getElementById('fam-filter-group');
+  const iFilter = document.getElementById('fam-filter-item');
+  const catFilter = document.getElementById('fam-filter-cat');
+  const groupVal = gFilter ? gFilter.value : '';
+  const itemVal = iFilter ? iFilter.value : '';
+  const catVal = catFilter ? catFilter.value : '';
+  const result = document.getElementById('fam-filter-result');
+  const d = _familyData;
+
+  // 更新 item 下拉选项（基于选中的 group）
+  if (iFilter && gFilter) {
+    const items = groupVal && d.items_by_group && d.items_by_group[groupVal]
+      ? d.items_by_group[groupVal] : [];
+    const prevItem = iFilter.value;
+    iFilter.innerHTML = '<option value="">全部子项</option>' +
+      items.map(it => `<option value="${escAttr(it)}" ${it === prevItem ? 'selected' : ''}>${escHtml(it)}</option>`).join('');
+  }
+
+  // 统计 & 显示/隐藏
+  let totalDocs = 0;
+  const allGroups = document.querySelectorAll('.fam-module');
+  allGroups.forEach(mod => {
+    const gName = mod.dataset.group;
+    const showGroup = !groupVal || gName === groupVal;
+    mod.style.display = showGroup ? '' : 'none';
+    if (!showGroup) return;
+
+    const itemCards = mod.querySelectorAll('.fam-item-card');
+    itemCards.forEach(card => {
+      const iName = card.dataset.item;
+      const showItem = !itemVal || iName === itemVal;
+      card.style.display = showItem ? '' : 'none';
+      if (!showItem) return;
+
+      // 按分类筛选文档行
+      let catMatchCount = 0;
+      const docRows = card.querySelectorAll('.fam-doc-row');
+      docRows.forEach(row => {
+        const catName = row.dataset.category || '';
+        const showRow = !catVal || catName === catVal;
+        row.style.display = showRow ? '' : 'none';
+        if (showRow) catMatchCount++;
+      });
+      // 没有匹配文档时隐藏整张子项卡片
+      if (catVal && catMatchCount === 0 && docRows.length > 0) {
+        card.style.display = 'none';
+      }
+    });
+
+    // 统计
+    if (d.documents && d.documents[gName]) {
+      const gDocs = d.documents[gName];
+      Object.keys(gDocs).forEach(it => {
+        if (itemVal && it !== itemVal) return;
+        const cats = gDocs[it] || {};
+        Object.keys(cats).forEach(cat => {
+          if (catVal && cat !== catVal) return;
+          const arr = cats[cat];
+          if (Array.isArray(arr)) totalDocs += arr.length;
+        });
+      });
+    }
+  });
+
+  if (result) {
+    const parts = [];
+    if (groupVal) parts.push(groupVal);
+    if (itemVal) parts.push('→ ' + itemVal);
+    if (catVal) parts.push('#' + catVal);
+    result.textContent = (parts.length ? parts.join(' ') + ' · ' : '') + totalDocs + ' 份资料';
+  }
+}
+
+// ── 递归收集所有文档 ──
+function collectAllDocs() {
+  const docs = [];
+  if (_familyData.documents) {
+    Object.values(_familyData.documents).forEach(items => {
+      if (items && typeof items === 'object') {
+        Object.values(items).forEach(cats => {
+          if (cats && typeof cats === 'object') {
+            Object.values(cats).forEach(arr => {
+              if (Array.isArray(arr)) arr.forEach(d => docs.push(d));
+            });
+          }
+        });
+      }
+    });
+  }
+  return docs;
+}
+
+async function loadFamilyFileInfo() {
+  const docs = collectAllDocs();
+  for (const doc of docs) {
+    try {
+      const r = await fetch(`/api/family/preview?path=${encodeURIComponent(doc.file_path)}`).then(r => r.json());
+      if (!r.ok || !r.info) continue;
+      doc._fileInfo = r.info;
+      const el = document.getElementById('fam-doc-' + doc.id);
+      if (!el) continue;
+      const info = r.info;
+      // 图标
+      const iconEl = el.querySelector('.fam-doc-icon');
+      if (iconEl) iconEl.textContent = info.is_image ? '🖼️' : info.is_pdf ? '📕' : '📄';
+      // 文件大小
+      let sizeEl = el.querySelector('.fam-doc-size');
+      if (info.exists && info.size) {
+        if (!sizeEl) {
+          sizeEl = document.createElement('span'); sizeEl.className = 'fam-doc-size';
+          el.insertBefore(sizeEl, el.querySelector('.fam-doc-actions'));
+        }
+        sizeEl.textContent = formatFileSize(info.size);
+      }
+      // 缺失
+      let missEl = el.querySelector('.fam-doc-missing');
+      if (!info.exists) {
+        if (!missEl) {
+          missEl = document.createElement('span'); missEl.className = 'fam-doc-missing'; missEl.textContent = '⚠ 文件不存在';
+          el.insertBefore(missEl, el.querySelector('.fam-doc-actions'));
+        }
+      } else if (missEl) { missEl.remove(); }
+      // 预览按钮
+      const hasPreview = info.exists && (info.is_image || info.is_pdf);
+      const actions = el.querySelector('.fam-doc-actions');
+      let previewBtn = actions ? actions.querySelector('.fam-preview-btn') : null;
+      if (hasPreview && !previewBtn) {
+        previewBtn = document.createElement('button');
+        previewBtn.className = 'fam-action-btn fam-preview-btn';
+        previewBtn.title = '预览'; previewBtn.textContent = '👁';
+        previewBtn.onclick = () => previewFamilyFile(doc.file_path);
+        if (actions) actions.insertBefore(previewBtn, actions.firstChild);
+      } else if (!hasPreview && previewBtn) { previewBtn.remove(); }
+    } catch(e) { /* ignore */ }
+  }
+}
+
+function formatFileSize(bytes) {
+  if (bytes < 1024) return bytes + ' B';
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+  return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+}
+
+function escHtml(s) { if (!s) return ''; return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+function escAttr(s) { if (!s) return ''; return s.replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/'/g,'&#39;'); }
+
+// ── 通用 Prompt 弹窗（替代原生 prompt）──
+function showPrompt(title, placeholder, currentVal, callback) {
+  const overlay = document.createElement('div');
+  overlay.className = 'fam-modal-overlay'; overlay.id = 'fam-prompt-overlay';
+  overlay.innerHTML = `<div class="fam-modal" style="max-width:380px;">
+    <div class="fam-modal-header"><span>${title}</span><button class="fam-modal-close" id="fam-prompt-close-btn">✕</button></div>
+    <div class="fam-modal-body">
+      <input type="text" id="fam-prompt-input" class="fam-prompt-input" placeholder="${escAttr(placeholder)}" value="${escAttr(currentVal)}" autofocus>
+    </div>
+    <div class="fam-modal-footer">
+      <button class="fam-btn-cancel" id="fam-prompt-cancel-btn">取消</button>
+      <button class="fam-btn-save" id="fam-prompt-ok">确定</button>
+    </div>
+  </div>`;
+  document.body.appendChild(overlay);
+  overlay.addEventListener('click', e => { if (e.target === overlay) closePrompt(); });
+  document.getElementById('fam-prompt-close-btn').addEventListener('click', closePrompt);
+  document.getElementById('fam-prompt-cancel-btn').addEventListener('click', closePrompt);
+  const input = document.getElementById('fam-prompt-input');
+  input.focus(); input.select();
+  document.getElementById('fam-prompt-ok').addEventListener('click', () => {
+    const v = input.value.trim();
+    closePrompt();
+    if (v) callback(v);
+  });
+  input.addEventListener('keydown', e => { if (e.key === 'Enter') document.getElementById('fam-prompt-ok').click(); });
+}
+function closePrompt() { const o = document.getElementById('fam-prompt-overlay'); if (o) o.remove(); }
+
+
+// ── 添加/编辑表单弹窗（全部下拉选择）──
+// ═══ 表单：子项 + 分类 + 文件地址（group 来自按钮上下文）═══
+function showFamilyForm(docId, preGroup, preItem, preCategory) {
+  try {
+  let doc = null, title = '添加资料';
+  if (docId) { doc = collectAllDocs().find(d => d.id === docId); title = '编辑资料'; }
+
+  const gVal = doc ? doc.group : (preGroup || '');
+  const itVal = doc ? doc.item : (preItem || '');
+  const cVal = doc ? doc.category : (preCategory || '');
+  const pVal = doc ? doc.file_path : '';
+
+  const items = (gVal && _familyData.items_by_group && _familyData.items_by_group[gVal])
+    ? _familyData.items_by_group[gVal] : [];
+
+  const overlay = document.createElement('div');
+  overlay.className = 'fam-modal-overlay'; overlay.id = 'fam-modal-overlay';
+  overlay.innerHTML = `<div class="fam-modal" style="max-width:420px;">
+    <div class="fam-modal-header"><span>${title}</span><button class="fam-modal-close" id="fam-form-close-btn">✕</button></div>
+    <div class="fam-modal-body">
+      <div class="fam-form-field-hint">大类：<strong>${escHtml(gVal || '未指定')}</strong></div>
+      <label class="fam-field">
+        <span>子项 <em>(必填)</em></span>
+        <input type="text" id="fam-form-item" placeholder="选择或输入子项" value="${escAttr(itVal)}" list="fam-item-datalist" autocomplete="off">
+        <datalist id="fam-item-datalist">${items.map(it => `<option value="${escAttr(it)}">`).join('')}</datalist>
+      </label>
+      <label class="fam-field">
+        <span>分类</span>
+        <input type="text" id="fam-form-category" placeholder="例如：身份证、户口本" value="${escAttr(cVal)}" autocomplete="off">
+      </label>
+      <label class="fam-field">
+        <span>文件地址 <em>(必填，支持 ~ 路径)</em></span>
+        <input type="text" id="fam-form-path" placeholder="~/Documents/身份证正面.jpg" value="${escAttr(pVal)}">
+      </label>
+    </div>
+    <div class="fam-modal-footer">
+      <button class="fam-btn-cancel" id="fam-cancel-btn">取消</button>
+      <button class="fam-btn-save" id="fam-save-btn">保存</button>
+    </div>
+  </div>`;
+  document.body.appendChild(overlay);
+  overlay.addEventListener('click', e => { if (e.target === overlay) closeFamilyForm(); });
+
+  document.getElementById('fam-form-close-btn').addEventListener('click', closeFamilyForm);
+  document.getElementById('fam-cancel-btn').addEventListener('click', closeFamilyForm);
+  document.getElementById('fam-save-btn').addEventListener('click', function() {
+    saveFamilyDoc(docId || '', gVal);
+  });
+
+  setTimeout(() => {
+    const itemEl = document.getElementById('fam-form-item');
+    if (itemEl) itemEl.focus();
+  }, 100);
+  } catch(e) { console.error('[fam] showFamilyForm error:', e); alert('表单渲染出错: ' + e.message); }
+}
+
+function closeFamilyForm() { const o = document.getElementById('fam-modal-overlay'); if (o) o.remove(); }
+
+async function saveFamilyDoc(docId, contextGroup) {
+  try {
+  const item = document.getElementById('fam-form-item').value.trim();
+  const category = document.getElementById('fam-form-category').value.trim();
+  const file_path = document.getElementById('fam-form-path').value.trim();
+
+  if (!item) { alert('请选择或输入子项'); return; }
+  if (!file_path) { alert('请输入文件地址'); return; }
+
+  const body = { group: contextGroup, item, category, file_path };
+  const url = docId ? `/api/family/documents/${docId}` : '/api/family/documents';
+  const method = docId ? 'PUT' : 'POST';
+  const r = await fetch(url, { method, headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) }).then(r => r.json());
+  if (r.ok) { closeFamilyForm(); await loadFamilyDetail(); }
+  else { alert(r.message || '保存失败'); }
+  } catch(e) { alert('保存出错: ' + e.message); }
+}
+
+async function deleteFamilyDoc(docId) {
+  if (!confirm('确定要删除这份资料吗？')) return;
+  const r = await fetch(`/api/family/documents/${docId}`, { method: 'DELETE' }).then(r => r.json());
+  if (r.ok) await loadFamilyDetail(); else alert(r.message || '删除失败');
+}
+
+// ── 大类/子项快捷管理 ──
+function showFamilyGroupForm() {
+  const groups = _familyData.groups || [];
+  const overlay = document.createElement('div');
+  overlay.className = 'fam-modal-overlay'; overlay.id = 'fam-modal-overlay';
+  overlay.innerHTML = `<div class="fam-modal" style="max-width:400px;">
+    <div class="fam-modal-header"><span>📁 新增大类+子项</span><button class="fam-modal-close" id="fam-group-close-btn">✕</button></div>
+    <div class="fam-modal-body">
+      <label class="fam-field"><span>大类</span>
+        <input type="text" id="fam-form-new-group" placeholder="人员 / 房产 / 车辆" list="fam-new-group-list" autocomplete="off">
+        <datalist id="fam-new-group-list">${groups.map(g => `<option value="${escAttr(g)}">`).join('')}</datalist>
+      </label>
+      <label class="fam-field"><span>子项名称 <em>(必填)</em></span>
+        <input type="text" id="fam-form-new-item" placeholder="例如：XX小区、张三"></label>
+    </div>
+    <div class="fam-modal-footer">
+      <button class="fam-btn-cancel" id="fam-group-cancel-btn">取消</button>
+      <button class="fam-btn-save" id="fam-group-save-btn">创建</button>
+    </div>
+  </div>`;
+  document.body.appendChild(overlay);
+  overlay.addEventListener('click', e => { if (e.target === overlay) closeFamilyForm(); });
+  document.getElementById('fam-group-close-btn').addEventListener('click', closeFamilyForm);
+  document.getElementById('fam-group-cancel-btn').addEventListener('click', closeFamilyForm);
+  document.getElementById('fam-group-save-btn').addEventListener('click', createFamilyGroup);
+  document.getElementById('fam-form-new-group').focus();
+}
+
+async function createFamilyGroup() {
+  const group = document.getElementById('fam-form-new-group').value.trim();
+  const item = document.getElementById('fam-form-new-item').value.trim();
+  if (!group) { alert('请选择或输入大类'); return; }
+  if (!item) { alert('请输入子项名称'); return; }
+  // 不创建占位文档，直接打开添加资料表单（预填大类+子项）
+  closeFamilyForm();
+  // 先更新本地数据，让表单的下拉能显示新大类/子项
+  if (!_familyData.groups) _familyData.groups = [];
+  if (!_familyData.groups.includes(group)) _familyData.groups.push(group);
+  if (!_familyData.items_by_group) _familyData.items_by_group = {};
+  if (!_familyData.items_by_group[group]) _familyData.items_by_group[group] = [];
+  if (!_familyData.items_by_group[group].includes(item)) _familyData.items_by_group[group].push(item);
+  if (!_familyData.documents) _familyData.documents = {};
+  if (!_familyData.documents[group]) _familyData.documents[group] = {};
+  if (!_familyData.documents[group][item]) _familyData.documents[group][item] = {};
+  showFamilyForm(null, group, item, '');
+}
+
+async function renameFamilyGroup(oldName) {
+  showPrompt('重命名大类', '输入新名称', oldName, async (n) => {
+    if (n === oldName) return;
+    const r = await fetch(`/api/family/groups/${encodeURIComponent(oldName)}`, {
+      method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify({name:n})
+    }).then(r=>r.json());
+    if (r.ok) await loadFamilyDetail(); else alert(r.message||'失败');
+  });
+}
+
+async function deleteFamilyGroup(group) {
+  if (!confirm(`确定删除大类「${group}」及其所有子项和资料吗？不可恢复！`)) return;
+  const r = await fetch(`/api/family/groups/${encodeURIComponent(group)}`, { method:'DELETE' }).then(r=>r.json());
+  if (r.ok) await loadFamilyDetail(); else alert(r.message||'失败');
+}
+
+// ── 子项管理 ──
+async function renameFamilyItem(group, item) {
+  showPrompt(`重命名「${group}」下的子项`, '输入新名称', item, async (n) => {
+    if (n === item) return;
+    const r = await fetch(`/api/family/groups/${encodeURIComponent(group)}/items/${encodeURIComponent(item)}`, {
+      method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify({name:n})
+    }).then(r=>r.json());
+    if (r.ok) await loadFamilyDetail(); else alert(r.message||'失败');
+  });
+}
+
+async function deleteFamilyItem(group, item) {
+  if (!confirm(`确定删除「${group} → ${item}」及其所有资料吗？不可恢复！`)) return;
+  const r = await fetch(`/api/family/groups/${encodeURIComponent(group)}/items/${encodeURIComponent(item)}`, { method:'DELETE' }).then(r=>r.json());
+  if (r.ok) await loadFamilyDetail(); else alert(r.message||'失败');
+}
+
+// ── 文件预览弹窗 ──
+function previewFamilyFile(filePath) {
+  const overlay = document.createElement('div');
+  overlay.className = 'fam-modal-overlay'; overlay.id = 'fam-preview-overlay';
+  overlay.innerHTML = `<div class="fam-modal fam-preview-modal">
+    <div class="fam-modal-header"><span>📄 文件预览</span><button class="fam-modal-close" id="fam-preview-close-btn">✕</button></div>
+    <div class="fam-preview-body">
+      <div class="fam-preview-path">${escHtml(filePath)}</div>
+      <div class="fam-preview-content" id="fam-preview-content"><div class="empty-state">加载中...</div></div>
+    </div></div>`;
+  document.body.appendChild(overlay);
+  overlay.addEventListener('click', e => { if (e.target === overlay) closeFamilyPreview(); });
+  document.getElementById('fam-preview-close-btn').addEventListener('click', closeFamilyPreview);
+  fetch(`/api/family/preview?path=${encodeURIComponent(filePath)}`).then(r=>r.json()).then(info => {
+    if (!info.ok||!info.info||!info.info.exists) {
+      document.getElementById('fam-preview-content').innerHTML='<div class="empty-state"><span class="empty-icon">⚠️</span>文件不存在或无法访问</div>'; return;
+    }
+    const fi=info.info, url=`/api/family/file?path=${encodeURIComponent(filePath)}`;
+    if (fi.is_image) document.getElementById('fam-preview-content').innerHTML=`<img src="${url}" class="fam-preview-img" onclick="this.classList.toggle('fam-preview-zoomed')">`;
+    else if (fi.is_pdf) document.getElementById('fam-preview-content').innerHTML=`<iframe src="${url}" class="fam-preview-pdf"></iframe>`;
+    else document.getElementById('fam-preview-content').innerHTML=`<div class="empty-state"><span class="empty-icon">📄</span><p>无法预览 (${fi.suffix})</p><a href="${url}" target="_blank" class="fam-download-link">⬇ 下载/打开</a></div>`;
+  }).catch(()=>{ document.getElementById('fam-preview-content').innerHTML='<div class="empty-state">加载失败</div>'; });
+}
+
+function closeFamilyPreview() { const o = document.getElementById('fam-preview-overlay'); if (o) o.remove(); }
+
+// ── JSON 配置编辑器 ──
+async function showConfigEditor() {
+  const overlay = document.createElement('div');
+  overlay.className = 'fam-modal-overlay'; overlay.id = 'fam-config-overlay';
+  overlay.innerHTML = `<div class="fam-modal" style="max-width:700px;height:80vh;display:flex;flex-direction:column;">
+    <div class="fam-modal-header"><span>⚙ 编辑配置 · family_docs.json</span><button class="fam-modal-close" id="fam-config-close-btn">✕</button></div>
+    <div class="fam-config-hint">
+      文件路径: <code>data/family_docs.json</code> &nbsp;|&nbsp;
+      格式: JSON 数组，每条记录 {id, group, item, name, category, file_path, created_at}
+    </div>
+    <div class="fam-modal-body" style="flex:1;overflow:hidden;padding:0;">
+      <textarea id="fam-config-textarea" class="fam-config-textarea" spellcheck="false"></textarea>
+    </div>
+    <div class="fam-modal-footer">
+      <span id="fam-config-status" style="flex:1;font-size:12px;color:var(--fg-muted);"></span>
+      <button class="fam-btn-cancel" id="fam-config-cancel-btn">取消</button>
+      <button class="fam-btn-save" id="fam-config-save-btn">💾 保存</button>
+    </div>
+  </div>`;
+  document.body.appendChild(overlay);
+  overlay.addEventListener('click', e => { if (e.target === overlay) closeConfigEditor(); });
+  document.getElementById('fam-config-close-btn').addEventListener('click', closeConfigEditor);
+  document.getElementById('fam-config-cancel-btn').addEventListener('click', closeConfigEditor);
+
+  // 加载当前 JSON
+  const textarea = document.getElementById('fam-config-textarea');
+  const status = document.getElementById('fam-config-status');
+  try {
+    const r = await fetch('/api/family/config').then(r => r.json());
+    if (r.ok) {
+      // 格式化 JSON
+      try {
+        const parsed = JSON.parse(r.content);
+        textarea.value = JSON.stringify(parsed, null, 2);
+      } catch(e) { textarea.value = r.content; }
+      status.textContent = `已加载，${textarea.value.split('\n').length} 行`;
+    } else {
+      textarea.value = r.content || '[]';
+      status.textContent = '⚠ ' + (r.message || '加载失败');
+    }
+  } catch(e) {
+    textarea.value = '[]';
+    status.textContent = '⚠ 加载失败: ' + e.message;
+  }
+
+  // 保存
+  document.getElementById('fam-config-save-btn').addEventListener('click', async () => {
+    const raw = textarea.value;
+    try {
+      const r = await fetch('/api/family/config', {
+        method: 'PUT',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({content: raw}),
+      }).then(r => r.json());
+      if (r.ok) {
+        status.textContent = '✅ 已保存 (' + (r.count || 0) + ' 条记录)';
+        closeConfigEditor();
+        loadFamilyDetail();
+      } else {
+        status.textContent = '❌ ' + (r.message || '保存失败');
+      }
+    } catch(e) {
+      status.textContent = '❌ 网络错误: ' + e.message;
+    }
+  });
+
+  // Tab 键支持
+  textarea.addEventListener('keydown', function(e) {
+    if (e.key === 'Tab') {
+      e.preventDefault();
+      const start = this.selectionStart;
+      this.value = this.value.substring(0, start) + '  ' + this.value.substring(this.selectionEnd);
+      this.selectionStart = this.selectionEnd = start + 2;
+    }
+  });
+}
+
+function closeConfigEditor() {
+  const o = document.getElementById('fam-config-overlay');
+  if (o) o.remove();
+}
+
+document.addEventListener('keydown', function(e) {
+  if (e.key === 'Escape') { closeFamilyForm(); closeFamilyPreview(); closePrompt(); closeConfigEditor(); }
+});
 
 init();
 </script>

@@ -42,6 +42,7 @@
   <a class="quick-nav-item" href="#col-jobs" data-section="jobs">💼 社招监控 <span class="nav-arrow">→</span></a>
   <a class="quick-nav-item" href="#col-stocks" data-section="stocks">📈 A股市场 <span class="nav-arrow">→</span></a>
   <a class="quick-nav-item" href="#col-wiki" data-section="wiki">📚 读书笔记 <span class="nav-arrow">→</span></a>
+  <a class="quick-nav-item" href="#col-family" data-section="family">🏠 家庭资料 <span class="nav-arrow">→</span></a>
 </nav>
 
 <!-- ═══ 日期导航器 ═══ -->
@@ -104,6 +105,20 @@
     </div>
   </div>
 
+  <!-- ━━ 卡片 4: 🏠 家庭资料 · 摘要 ━━ -->
+  <div class="bento-card span-2" id="col-family">
+    <div class="card-header">
+      <span class="card-icon">🏠</span> 家庭资料
+      <a href="/detail/family" class="card-header-link">详情 →</a>
+    </div>
+    <div class="card-body card-compact">
+      <div id="family-preview">
+        <div class="skeleton skeleton-text"></div>
+        <div class="skeleton skeleton-text short"></div>
+      </div>
+    </div>
+  </div>
+
 </div><!-- /bento-grid -->
 
 <footer>仪表盘 · 自动刷新</footer>
@@ -146,6 +161,8 @@ function initTheme() {
     document.documentElement.removeAttribute('data-theme');
   else document.documentElement.setAttribute('data-theme', 'light');
 }
+
+function escHtml(s) { if (!s) return ''; return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 
 // ═══ 初始化 ═══
 async function init() {
@@ -211,25 +228,42 @@ function renderDateStrip() {
 function jumpToToday() { currentDate = new Date().toISOString().slice(0,10); renderDateStrip(); loadAll(); }
 function changeDate(d) { const dd = getDisplayDates(); const i = dd.indexOf(currentDate); if (i < 0) return; const ni = i+d; if (ni>=0 && ni<dd.length) { currentDate = dd[ni]; renderDateStrip(); loadAll(); } }
 
-// ═══ 快速导航 · 平滑滚动 ═══
-document.querySelectorAll('.quick-nav-item[href^="#"]').forEach(item => {
+// ═══ 快速导航 · 点击高亮 + 滚动联动 ═══
+let _navItems = document.querySelectorAll('.quick-nav-item[href^="#"]');
+let _sectionIds = Array.from(_navItems).map(i => i.getAttribute('href'));
+
+function highlightNav(activeId) {
+  _navItems.forEach(i => i.classList.toggle('active', i.getAttribute('href') === activeId));
+}
+
+function getClosestSection() {
+  let active = null, closest = Infinity;
+  const h = document.querySelector('header').offsetHeight + 60;
+  _sectionIds.forEach(id => {
+    const el = document.querySelector(id);
+    if (!el) return;
+    const dist = Math.abs(el.getBoundingClientRect().top - h);
+    if (dist < closest) { closest = dist; active = id; }
+  });
+  return active;
+}
+
+_navItems.forEach(item => {
   item.addEventListener('click', function(e) {
     e.preventDefault();
     const t = document.querySelector(this.getAttribute('href'));
     if (t) {
+      highlightNav(this.getAttribute('href'));
       const h = document.querySelector('header').offsetHeight + 60;
       window.scrollTo({ top: t.getBoundingClientRect().top + window.scrollY - h, behavior: 'smooth' });
     }
   });
 });
-let _navItems = document.querySelectorAll('.quick-nav-item[href^="#"]');
-let _sectionIds = Array.from(_navItems).map(i => i.getAttribute('href'));
-window.addEventListener('scroll', () => {
-  let active = null;
-  const h = document.querySelector('header').offsetHeight + 60;
-  _sectionIds.forEach(id => { const el = document.querySelector(id); if (el && el.getBoundingClientRect().top < h + 200) active = id; });
-  _navItems.forEach(i => i.classList.toggle('active', i.getAttribute('href') === active));
-}, { passive: true });
+
+window.addEventListener('scroll', () => highlightNav(getClosestSection()), { passive: true });
+
+// 页面加载完跑一次，初始化高亮
+setTimeout(() => highlightNav(getClosestSection()), 500);
 
 // ═══ 键盘 ═══
 document.addEventListener('keydown', function(e) {
@@ -241,7 +275,7 @@ document.addEventListener('keydown', function(e) {
 
 // ═══ 全量加载 ═══
 async function loadAll() {
-  await Promise.all([loadJobs(), loadMarket(), loadWiki()]);
+  await Promise.all([loadJobs(), loadMarket(), loadWiki(), loadFamily()]);
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -362,6 +396,74 @@ async function loadWiki() {
     }
     document.getElementById('wiki-preview').innerHTML = html;
   } catch(e) { console.error(e); }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// 家庭资料 · 摘要版
+// ═══════════════════════════════════════════════════════════════
+async function loadFamily() {
+  try {
+    const r = await fetch('/api/family/documents').then(r => r.json());
+    const groups = r.groups || [];
+    const total = r.total || 0;
+    const G_ICONS = { '人员': '👤', '房产': '🏠', '车辆': '🚗' };
+
+    let html = '<div class="summary-grid" style="grid-template-columns:repeat(auto-fill,minmax(90px,1fr));">';
+    if (groups.length > 0) {
+      groups.forEach(group => {
+        const items = (r.items_by_group && r.items_by_group[group]) ? r.items_by_group[group] : [];
+        const ic = G_ICONS[group] || '📂';
+        html += `<span class="summary-stat" style="cursor:default;">
+          <span class="summary-stat-num">${items.length}</span>
+          <span class="summary-stat-label">${ic} ${escHtml(group)}</span></span>`;
+      });
+    } else {
+      html += '<span class="summary-stat" style="cursor:default;grid-column:1/-1;"><span class="summary-stat-label">暂无资料</span></span>';
+    }
+    html += '</div>';
+
+    if (total > 0) {
+      html += `<div style="margin-top:8px;font-size:11px;color:var(--fg-muted);text-align:center;">
+        ${groups.length} 个大类 · ${total} 份资料
+        <span id="family-missing-count" style="color:var(--fg-muted);"> · 检查中...</span>
+      </div>`;
+    }
+    document.getElementById('family-preview').innerHTML = html;
+
+    // 异步检查文件缺失
+    checkMissingFiles(r);
+  } catch(e) { console.error(e); }
+}
+
+async function checkMissingFiles(data) {
+  // 收集所有文档的 file_path
+  const paths = [];
+  if (data.documents) {
+    Object.values(data.documents).forEach(items => {
+      Object.values(items).forEach(cats => {
+        Object.values(cats).forEach(docs => {
+          docs.forEach(d => paths.push(d.file_path));
+        });
+      });
+    });
+  }
+
+  let missing = 0;
+  // 逐个检查（最多展示前20条，避免请求太多）
+  const batch = paths.slice(0, 20);
+  for (const p of batch) {
+    try {
+      const r = await fetch(`/api/family/preview?path=${encodeURIComponent(p)}`).then(r => r.json());
+      if (r.ok && r.info && !r.info.exists) missing++;
+    } catch(e) {}
+  }
+
+  const el = document.getElementById('family-missing-count');
+  if (el && missing > 0) {
+    el.innerHTML = ` · <span style="color:var(--danger);font-weight:700;">⚠ ${missing} 个文件不存在</span>`;
+  } else if (el) {
+    el.textContent = '';
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════
