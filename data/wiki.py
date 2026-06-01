@@ -21,19 +21,14 @@ def _sort_key_numeric(name: str) -> tuple:
 def scan_wiki() -> dict:
     """扫描 wiki 目录，返回所有分类的结构化数据"""
     if not WIKI_ROOT.exists():
-        return {"books": [], "concepts": [], "papers": [], "huatai_series": [], "huatai_notes_html": None}
+        return {"books": [], "papers": []}
 
     books = _scan_books()
-    concepts = _scan_concepts()
     papers = _scan_papers()
-    huatai_series, huatai_notes = _scan_huatai()
 
     return {
         "books": books,
-        "concepts": concepts,
         "papers": papers,
-        "huatai_series": huatai_series,
-        "huatai_notes_html": huatai_notes,
     }
 
 
@@ -95,24 +90,39 @@ def _scan_concepts() -> list[dict]:
 
 
 def _scan_papers() -> list[dict]:
-    """扫描 论文/ 目录：每个 html 文件是一篇论文"""
+    """扫描 论文/ 目录：每个子目录=一篇论文，含 md + html 文件"""
     papers_dir = WIKI_ROOT / "论文"
     if not papers_dir.is_dir():
         return []
 
     papers = []
-    for f in sorted(papers_dir.iterdir(), key=lambda x: x.name):
-        if f.name in IGNORE:
+    for paper_dir in sorted(papers_dir.iterdir(), key=lambda d: d.name):
+        if not paper_dir.is_dir() or paper_dir.name in IGNORE:
+            # 兼容：顶层 .md/.html 文件也当作论文
+            if paper_dir.is_file() and paper_dir.suffix in (".md", ".html"):
+                papers.append({
+                    "name": paper_dir.stem,
+                    "file": str(paper_dir.relative_to(WIKI_ROOT)),
+                })
             continue
-        if f.suffix == ".html":
+
+        body_file = None
+        notes_html = None
+        for f in sorted(paper_dir.iterdir(), key=lambda x: x.name):
+            if f.name in IGNORE:
+                continue
+            if f.suffix == ".md" and not body_file:
+                body_file = str(f.relative_to(WIKI_ROOT))
+            elif f.suffix == ".html":
+                notes_html = str(f.relative_to(WIKI_ROOT))
+
+        # 优先用 .md 作为主文件，否则用 .html
+        main = body_file or notes_html
+        if main:
             papers.append({
-                "name": f.stem,
-                "file": str(f.relative_to(WIKI_ROOT)),
-            })
-        elif f.suffix == ".md":
-            papers.append({
-                "name": f.stem,
-                "file": str(f.relative_to(WIKI_ROOT)),
+                "name": paper_dir.name,
+                "file": main,
+                "notes_html": notes_html if notes_html != main else None,
             })
 
     return papers

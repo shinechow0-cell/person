@@ -114,11 +114,9 @@ function renderConfig() {
       items: [
         ['根目录', '~/Documents/mywiki/wiki/', '环境变量 WIKI_PATH 可覆盖'],
         ['书籍', 'wiki/书籍/{书名}/*.md + *.html', '子目录=书，.md=章节(数字前缀排序)，.html=笔记'],
-        ['概念', 'wiki/概念/概念-XXX.md', '文件名格式 概念-名称.md, 自动去掉前缀显示'],
         ['论文', 'wiki/论文/*.html / *.md', '.html 标记 [HTML] 徽章'],
-        ['华泰金工', 'wiki/华泰金工AI系列/第XX期-....md', '按文件名数字排序，.html=系列笔记'],
         ['忽略项', '.DS_Store / .obsidian / .trash / .git', '扫描时自动跳过'],
-        ['Wiki 查看', '/wiki/view?path=相对路径', '路径穿越保护 + Markdown→HTML 渲染'],
+        ['Wiki 查看', '/wiki/view?path=相对路径', '路径穿越保护 + Markdown→HTML'],
         ['数据刷新', '每次请求实时扫描文件系统', '无缓存，文件变更即时生效'],
       ]
     }
@@ -300,78 +298,100 @@ async function loadStocksDetail() {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// 读书笔记详情
+// 读书笔记详情 (书籍 + 论文)
 // ═══════════════════════════════════════════════════════════════
 async function loadWikiDetail() {
   try {
-    const [br, cr, pr, hr] = await Promise.all([
+    const [br, pr] = await Promise.all([
       fetch('/api/wiki/books').then(r => r.json()),
-      fetch('/api/wiki/concepts').then(r => r.json()),
       fetch('/api/wiki/papers').then(r => r.json()),
-      fetch('/api/wiki/huatai').then(r => r.json()),
     ]);
+    const books = br.books || [], papers = pr.papers || [];
 
-    let html = '';
+    // 加载阅读状态
+    let readingStatus = {};
+    try { readingStatus = await fetch('/api/reading/status').then(r => r.json()); } catch(e) {}
+    window._readingStatus = readingStatus;
 
-    // ── 书籍 ──
-    const books = br.books || [];
+    document.getElementById('detail-meta').textContent = `${books.length} 本书 · ${papers.length} 篇论文`;
+
+    let html = '<div class="wiki-split">';
+
+    // ── 左栏：书籍 ──
+    html += '<div class="detail-card"><div class="detail-card-header">📖 书籍 · ' + books.length + ' 本</div><div class="detail-card-body">';
     if (books.length > 0) {
-      html += `<div class="detail-card"><div class="detail-card-header">📖 书籍 · ${books.length} 本</div><div class="detail-card-body">`;
       books.forEach((book, i) => {
         const bid = `dbook-${i}`;
-        html += `<div class="wiki-book expanded" id="${bid}-container">
+        const hasChapters = book.chapters && book.chapters.length > 0;
+        const bookKey = '书籍/' + book.name;
+        const st = getReadingStatus(bookKey);
+        html += `<div class="wiki-book" id="${bid}-container">
           <div class="wiki-book-header" onclick="toggleBookD('${bid}')">
-            <span class="wiki-book-name">${book.name}</span>
-            <span class="wiki-book-arrow">▼</span></div>
-          <div class="wiki-chapters">`;
-        (book.chapters||[]).forEach(ch => {
-          html += `<div class="wiki-chapter-item"><a href="/wiki/view?path=${encodeURIComponent(ch.file)}" target="_blank">📄 ${ch.title}</a></div>`;
-        });
+            <span class="reading-dot ${st}" onclick="event.stopPropagation();cycleReading('${bookKey}',this)" title="点击切换已读/未读"></span>
+            <span class="wiki-book-name">${book.name}</span>`;
         if (book.notes_html) {
-          html += `<a class="wiki-notes-link" href="/wiki/view?path=${encodeURIComponent(book.notes_html)}" target="_blank">📝 阅读笔记</a>`;
+          html += `<a class="wiki-notes-link" href="/wiki/view?path=${encodeURIComponent(book.notes_html)}" target="_blank" onclick="event.stopPropagation()">📝</a>`;
         }
+        html += `${hasChapters ? '<span class="wiki-book-arrow">▶</span>' : ''}</div>`;
+        if (hasChapters) {
+          html += '<div class="wiki-chapters">';
+          book.chapters.forEach(ch => {
+            html += `<div class="wiki-chapter-item"><a href="/wiki/view?path=${encodeURIComponent(ch.file)}" target="_blank">📄 ${ch.title}</a></div>`;
+          });
+          html += '</div>';
+        }
+        html += '</div>';
+      });
+    } else {
+      html += '<div class="empty-state">暂无</div>';
+    }
+    html += '</div></div>';
+
+    // ── 右栏：论文 ──
+    html += '<div class="detail-card"><div class="detail-card-header">📄 论文 · ' + papers.length + ' 篇</div><div class="detail-card-body">';
+    if (papers.length > 0) {
+      papers.forEach((p, i) => {
+        const pid = `dpaper-${i}`;
+        const paperKey = '论文/' + p.name;
+        const st = getReadingStatus(paperKey);
+        html += `<div class="wiki-book" id="${pid}-container">
+          <div class="wiki-book-header" onclick="toggleBookD('${pid}')">
+            <span class="reading-dot ${st}" onclick="event.stopPropagation();cycleReading('${paperKey}',this)" title="点击切换已读/未读"></span>
+            <span class="wiki-book-name">${p.name}</span>`;
+        if (p.notes_html) {
+          html += `<a class="wiki-notes-link" href="/wiki/view?path=${encodeURIComponent(p.notes_html)}" target="_blank" onclick="event.stopPropagation()">📝</a>`;
+        }
+        html += '<span class="wiki-book-arrow">▶</span></div>';
+        html += '<div class="wiki-chapters">';
+        html += `<div class="wiki-chapter-item"><a href="/wiki/view?path=${encodeURIComponent(p.file)}" target="_blank">📄 阅读正文</a></div>`;
         html += '</div></div>';
       });
-      html += '</div></div>';
+    } else {
+      html += '<div class="empty-state">暂无</div>';
     }
+    html += '</div></div>';
 
-    // ── 概念 ──
-    const concepts = cr.concepts || [];
-    if (concepts.length > 0) {
-      html += `<div class="detail-card"><div class="detail-card-header">💡 概念 · ${concepts.length} 个</div><div class="detail-card-body">`;
-      concepts.forEach(c => {
-        html += `<div class="wiki-concept-item"><a href="/wiki/view?path=${encodeURIComponent(c.file)}" target="_blank">${c.name}</a></div>`;
-      });
-      html += '</div></div>';
-    }
-
-    // ── 论文 ──
-    const papers = pr.papers || [];
-    if (papers.length > 0) {
-      html += `<div class="detail-card"><div class="detail-card-header">📄 论文 · ${papers.length} 篇</div><div class="detail-card-body">`;
-      papers.forEach(p => {
-        const badge = p.file.endsWith('.html') ? '<span class="wiki-paper-badge">HTML</span>' : '';
-        html += `<div class="wiki-paper-item"><a href="/wiki/view?path=${encodeURIComponent(p.file)}" target="_blank">${p.name}</a>${badge}</div>`;
-      });
-      html += '</div></div>';
-    }
-
-    // ── 华泰金工 ──
-    const huatai = hr.huatai_series || [];
-    if (huatai.length > 0) {
-      html += `<div class="detail-card"><div class="detail-card-header">🏦 华泰金工AI系列 · ${huatai.length} 期</div><div class="detail-card-body">
-        <div class="wiki-huatai-list">`;
-      huatai.forEach(s => {
-        html += `<div class="wiki-huatai-item"><a href="/wiki/view?path=${encodeURIComponent(s.file)}" target="_blank">${s.name}</a></div>`;
-      });
-      html += '</div></div></div>';
-    }
-
-    if (!html) {
-      html = '<div class="detail-card"><div class="detail-card-body"><div class="empty-state"><span class="empty-icon">📚</span>暂无数据</div></div></div>';
-    }
+    html += '</div>';
     document.getElementById('detail-content').innerHTML = html;
   } catch(e) { console.error(e); }
+}
+
+function getReadingStatus(file) {
+  const s = (window._readingStatus || {})[file];
+  return (s && s.status) || 'unread';
+}
+async function cycleReading(file, el) {
+  const cur = getReadingStatus(file);
+  const next = cur === 'finished' ? 'unread' : 'finished';
+  await fetch('/api/reading/mark', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path: file, status: next }),
+  });
+  el.className = 'reading-dot ' + next;
+  el.title = next === 'finished' ? '已读完' : '未读';
+  if (!window._readingStatus) window._readingStatus = {};
+  window._readingStatus[file] = { status: next };
 }
 
 function toggleBookD(bid) {

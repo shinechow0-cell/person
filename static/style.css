@@ -1236,6 +1236,35 @@ body[data-view="mobile"] .bento-grid {
    Card: 读书笔记 (Wiki) · Span-2
    ═══════════════════════════════════════════════════════════════ */
 
+/* Wiki Split (书籍左 / 论文右) */
+.wiki-split {
+  display: grid; grid-template-columns: 1fr 1fr;
+  gap: var(--space-4); align-items: start;
+}
+@media (max-width: 800px) { .wiki-split { grid-template-columns: 1fr; } }
+
+/* Reading Status */
+.reading-dot {
+  display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+  flex-shrink: 0; cursor: pointer; margin-right: 8px;
+  transition: all var(--duration-fast);
+  border: 1.5px solid var(--border-default);
+  background: transparent;
+}
+.reading-dot.unread { background: transparent; border-color: var(--border-default); }
+.reading-dot.reading { background: var(--accent-3); border-color: var(--accent-3); box-shadow: 0 0 5px var(--accent-3-glow); }
+.reading-dot.finished { background: var(--accent); border-color: var(--accent); box-shadow: 0 0 5px var(--accent-glow); }
+.reading-dot:hover { transform: scale(1.4); }
+
+.reading-toggle {
+  font-size: 9px; cursor: pointer; user-select: none;
+  padding: 2px 6px; border-radius: 8px; border: 1px solid var(--border-subtle);
+  background: transparent; color: var(--fg-muted);
+  transition: all var(--duration-fast);
+  white-space: nowrap; flex-shrink: 0;
+}
+.reading-toggle:hover { border-color: var(--border-default); color: var(--fg-primary); }
+
 /* Book accordion */
 .wiki-book {
   border: 1px solid var(--border-subtle);

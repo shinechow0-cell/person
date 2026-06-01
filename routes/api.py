@@ -167,25 +167,29 @@ def api_wiki_books():
     return jsonify({"books": data["books"]})
 
 
-@api.route("/wiki/concepts")
-def api_wiki_concepts():
-    data = scan_wiki()
-    return jsonify({"concepts": data["concepts"]})
-
-
 @api.route("/wiki/papers")
 def api_wiki_papers():
     data = scan_wiki()
     return jsonify({"papers": data["papers"]})
 
 
-@api.route("/wiki/huatai")
-def api_wiki_huatai():
-    data = scan_wiki()
-    return jsonify({
-        "huatai_series": data["huatai_series"],
-        "huatai_notes_html": data["huatai_notes_html"],
-    })
+# ── API: 阅读进度 ──────────────────────────────────────
+
+@api.route("/reading/status")
+def api_reading_status():
+    from data.reading import get_all
+    return jsonify(get_all())
+
+
+@api.route("/reading/mark", methods=["POST"])
+def api_reading_mark():
+    from data.reading import mark_as
+    body = request.get_json(force=True) or {}
+    path = body.get("path", "")
+    status = body.get("status", "unread")
+    if path:
+        mark_as(path, status)
+    return jsonify({"ok": True})
 
 
 # ── 页面: Wiki 文件查看 ───────────────────────────────────
@@ -211,10 +215,19 @@ def wiki_view():
         return "无法读取文件（编码错误）", 500
 
     if full.suffix == ".html":
+        # 记录阅读中
+        from data.reading import mark_opened
+        mark_opened(rel)
         return content
 
-    # Markdown → 最小 HTML 包装
-    escaped = content.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    # 记录阅读中
+    from data.reading import mark_opened
+    mark_opened(rel)
+
+    # Markdown → HTML 渲染
+    import markdown
+    md = markdown.Markdown(extensions=["fenced_code", "tables"])
+    body_html = md.convert(content)
     title = full.stem
     return f"""<!DOCTYPE html>
 <html lang="zh-CN">
@@ -224,22 +237,31 @@ def wiki_view():
 <title>{title}</title>
 <style>
   body {{
-    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Microsoft YaHei", sans-serif;
     max-width: 800px; margin: 40px auto; padding: 0 24px;
-    line-height: 1.8; color: #1d1d1f; background: #fff;
-    font-size: 16px;
+    line-height: 1.9; color: #1d1d1f; -webkit-font-smoothing: antialiased;
   }}
-  h1 {{ font-size: 24px; margin-bottom: 24px; color: #0071e3; }}
-  pre {{
-    white-space: pre-wrap; word-wrap: break-word;
-    font-family: inherit; font-size: 15px; line-height: 1.8;
-    background: none; padding: 0; border: none;
-  }}
+  h1 {{ font-size: 28px; margin: 32px 0 24px; color: #0f172a; border-bottom: 2px solid #e2e8f0; padding-bottom: 12px; }}
+  h2 {{ font-size: 22px; margin: 28px 0 14px; color: #1e293b; }}
+  h3 {{ font-size: 18px; margin: 22px 0 10px; color: #334155; }}
+  p {{ margin: 0 0 14px; }}
+  ul, ol {{ margin: 0 0 14px; padding-left: 24px; }}
+  li {{ margin-bottom: 4px; }}
+  code {{ background: #f1f5f9; color: #e11d48; padding: 2px 6px; border-radius: 4px; font-family: "JetBrains Mono", monospace; font-size: 14px; }}
+  pre {{ background: #1e293b; color: #e2e8f0; padding: 16px 20px; border-radius: 8px; overflow-x: auto; line-height: 1.6; font-family: "JetBrains Mono", monospace; font-size: 13px; }}
+  pre code {{ background: none; color: inherit; padding: 0; font-size: inherit; }}
+  blockquote {{ border-left: 4px solid #3b82f6; margin: 0 0 14px; padding: 8px 16px; background: #f8fafc; color: #475569; }}
+  table {{ border-collapse: collapse; width: 100%; margin: 0 0 16px; }}
+  th, td {{ border: 1px solid #e2e8f0; padding: 8px 12px; text-align: left; font-size: 14px; }}
+  th {{ background: #f8fafc; font-weight: 600; }}
+  a {{ color: #2563eb; text-decoration: none; }}
+  a:hover {{ text-decoration: underline; }}
+  strong {{ color: #0f172a; }}
+  hr {{ border: none; border-top: 1px solid #e2e8f0; margin: 24px 0; }}
 </style>
 </head>
 <body>
-<h1>{title}</h1>
-<pre>{escaped}</pre>
+{body_html}
 </body>
 </html>"""
 

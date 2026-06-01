@@ -340,39 +340,26 @@ async function loadMarket() {
 // ═══════════════════════════════════════════════════════════════
 async function loadWiki() {
   try {
-    const [br, cr, pr, hr] = await Promise.all([
+    const [br, pr] = await Promise.all([
       fetch('/api/wiki/books').then(r => r.json()),
-      fetch('/api/wiki/concepts').then(r => r.json()),
       fetch('/api/wiki/papers').then(r => r.json()),
-      fetch('/api/wiki/huatai').then(r => r.json()),
     ]);
+    const books = br.books || [], papers = pr.papers || [];
 
-    const books = br.books || [], concepts = cr.concepts || [],
-          papers = pr.papers || [], huatai = hr.huatai_series || [];
-
-    let html = '<div class="summary-grid">';
+    let html = '<div class="summary-grid" style="grid-template-columns:repeat(2,1fr);">';
     html += `<a href="/detail/wiki" class="summary-stat">
       <span class="summary-stat-num">${books.length}</span>
       <span class="summary-stat-label">📖 书籍</span></a>`;
     html += `<a href="/detail/wiki" class="summary-stat">
-      <span class="summary-stat-num">${concepts.length}</span>
-      <span class="summary-stat-label">💡 概念</span></a>`;
-    html += `<a href="/detail/wiki" class="summary-stat">
       <span class="summary-stat-num">${papers.length}</span>
       <span class="summary-stat-label">📄 论文</span></a>`;
-    html += `<a href="/detail/wiki" class="summary-stat">
-      <span class="summary-stat-num">${huatai.length}</span>
-      <span class="summary-stat-label">🏦 华泰系列</span></a>`;
     html += '</div>';
-
-    // 最近更新的书名
     if (books.length > 0) {
       html += '<div style="margin-top:12px;font-size:11px;color:var(--fg-muted);">';
-      html += '📚 ' + books.slice(0,3).map(b => b.name).join(' · ');
-      if (books.length > 3) html += ` 等${books.length}本`;
+      html += books.slice(0,3).map(b => b.name).join(' · ');
+      if (books.length > 3) html += ` 等`;
       html += '</div>';
     }
-
     document.getElementById('wiki-preview').innerHTML = html;
   } catch(e) { console.error(e); }
 }
