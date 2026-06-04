@@ -1528,7 +1528,7 @@ footer {
   transition: max-height 0.4s var(--ease-out);
   margin-bottom: 0;
 }
-.config-panel.open { max-height: 800px; margin-bottom: var(--space-5); }
+.config-panel.open { max-height: 1200px; margin-bottom: var(--space-5); }
 
 .config-card {
   margin-top: var(--space-4);
