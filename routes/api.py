@@ -2,18 +2,21 @@
 import os
 import sqlite3
 import subprocess
+import threading
 from datetime import date, datetime
 from pathlib import Path
 
-from flask import Blueprint, render_template, jsonify, request, send_file, abort
+from flask import Blueprint, render_template, jsonify, request, send_file, abort, session
 
-from data.jobs import get_jobs_by_date, get_job_dates, get_job_summary
+from data.jobs import get_jobs_by_date, get_job_dates, get_job_summary, load_all_jobs
+from data.job_status import get_all as job_status_all, set_status as job_status_set
 from data.stocks import (
     get_available_dates, get_latest_date,
     get_market_summary, get_sector_rankings, get_northbound,
     get_dragon_tiger, get_hot_stocks, get_collection_status,
 )
 from data.wiki import scan_wiki, get_file_content, WIKI_ROOT
+from data import vault
 from data.family import (
     get_all as family_get_all, add as family_add, update as family_update,
     delete as family_delete,
@@ -45,7 +48,7 @@ def index():
 @pages.route("/detail/<module>")
 def detail(module):
     """详情页：jobs / stocks / wiki"""
-    valid = {"jobs": "社招监控", "stocks": "A股市场", "wiki": "读书笔记", "family": "家庭资料"}
+    valid = {"jobs": "社招监控", "stocks": "A股市场", "wiki": "读书笔记", "family": "家庭资料", "vault": "密码保险库"}
     if module not in valid:
         return "Not found", 404
     return render_template("detail.html", module=module, title=valid[module])
@@ -94,14 +97,59 @@ def status():
 
 @api.route("/jobs")
 def api_jobs():
-    target = request.args.get("date", date.today().isoformat())
+    target = request.args.get("date", "")
+    statuses = job_status_all()
+    if target == "all" or not target:
+        all_jobs = load_all_jobs()
+        # 附带状态
+        for j in all_jobs:
+            j["status"] = statuses.get(j["id"], {}).get("status", "")
+        by_date: dict[str, list[dict]] = {}
+        for j in all_jobs:
+            d = j.get("first_seen", "未知")
+            if d not in by_date:
+                by_date[d] = []
+            by_date[d].append(j)
+        return jsonify({
+            "total": len(all_jobs),
+            "by_date": by_date,
+            "dates": sorted(by_date.keys(), reverse=True),
+        })
     jobs = get_jobs_by_date(target)
+    # 附带状态（与 date=all 分支保持一致）
+    for j in jobs:
+        j["status"] = statuses.get(j["id"], {}).get("status", "")
     return jsonify({"date": target, "count": len(jobs), "jobs": jobs})
 
 
 @api.route("/jobs/dates")
 def api_job_dates():
     return jsonify({"dates": get_job_dates()})
+
+
+@api.route("/jobs/<job_id>/status", methods=["PUT"])
+def api_job_status(job_id):
+    body = request.get_json(force=True) or {}
+    status = body.get("status", "")
+    job_status_set(job_id, status)
+    return jsonify({"ok": True, "job_id": job_id, "status": status})
+
+
+@api.route("/jobs/all")
+def api_jobs_all():
+    jobs = load_all_jobs()
+    # 按日期分组
+    by_date: dict[str, list[dict]] = {}
+    for j in jobs:
+        d = j.get("first_seen", "未知")
+        if d not in by_date:
+            by_date[d] = []
+        by_date[d].append(j)
+    return jsonify({
+        "total": len(jobs),
+        "by_date": by_date,
+        "dates": sorted(by_date.keys(), reverse=True),
+    })
 
 
 # ── API: A股 ──────────────────────────────────────────
@@ -338,6 +386,21 @@ def api_trigger_jobs():
     return jsonify({"ok": True, "message": "已触发执行"})
 
 
+@api.route("/trigger/validate-jobs", methods=["POST"])
+def api_trigger_validate_jobs():
+    """触发国聘岗位过期校验（后台线程执行）"""
+    from data.iguopin_validator import validate_iguopin_jobs
+
+    def _run():
+        try:
+            validate_iguopin_jobs(quiet=True)
+        except Exception:
+            pass
+
+    threading.Thread(target=_run, daemon=True).start()
+    return jsonify({"ok": True, "message": "已触发过期岗位检查"})
+
+
 @api.route("/trigger/stocks", methods=["POST"])
 def api_trigger_stocks():
     if STOCK_LOCK_FILE.exists():
@@ -518,7 +581,7 @@ def api_family_file():
 
     # 安全检查：只允许常见文档/图片类型
     allowed = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".svg",
-               ".pdf", ".doc", ".docx", ".xls", ".xlsx"}
+               ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".md"}
     if p.suffix.lower() not in allowed:
         abort(403)
 
@@ -528,3 +591,178 @@ def api_family_file():
         return send_file(str(p), mimetype=f"image/{p.suffix.lstrip('.').replace('jpg', 'jpeg')}")
 
     return send_file(str(p), as_attachment=False)
+
+
+@api.route("/family/markdown")
+def api_family_markdown():
+    """读取 markdown 文件，返回原始内容和渲染后的 HTML"""
+    rel = request.args.get("path", "")
+    if not rel:
+        return jsonify({"ok": False, "message": "缺少路径参数"}), 400
+
+    p = Path(rel).expanduser()
+    if not p.is_absolute():
+        p = Path.home() / rel
+    p = p.resolve()
+
+    if not p.exists() or not p.is_file():
+        return jsonify({"ok": False, "message": "文件不存在"}), 404
+    if p.suffix.lower() != ".md":
+        return jsonify({"ok": False, "message": "仅支持 .md 文件"}), 400
+
+    try:
+        raw = p.read_text(encoding="utf-8")
+    except (UnicodeDecodeError, IOError):
+        return jsonify({"ok": False, "message": "文件编码错误"}), 500
+
+    import markdown
+    md = markdown.Markdown(extensions=["fenced_code", "tables"])
+    html = md.convert(raw)
+
+    return jsonify({
+        "ok": True,
+        "title": p.stem,
+        "raw": raw,
+        "html": html,
+    })
+
+
+@api.route("/family/markdown", methods=["PUT"])
+def api_family_markdown_save():
+    """保存编辑后的 markdown 内容"""
+    body = request.get_json(force=True) or {}
+    rel = body.get("path", "").strip()
+    content = body.get("content", "")
+
+    if not rel:
+        return jsonify({"ok": False, "message": "缺少路径参数"}), 400
+
+    p = Path(rel).expanduser()
+    if not p.is_absolute():
+        p = Path.home() / rel
+    p = p.resolve()
+
+    if not p.exists() or not p.is_file():
+        return jsonify({"ok": False, "message": "文件不存在"}), 404
+    if p.suffix.lower() != ".md":
+        return jsonify({"ok": False, "message": "仅支持 .md 文件"}), 400
+
+    try:
+        # 原子写入：先写 .tmp 再 rename
+        tmp = p.with_suffix(".md.tmp")
+        tmp.write_text(content, encoding="utf-8")
+        os.replace(tmp, p)
+    except (IOError, OSError) as e:
+        return jsonify({"ok": False, "message": f"写入失败: {e}"}), 500
+
+    return jsonify({"ok": True, "message": "已保存"})
+
+
+# ── API: 密码保险库 ────────────────────────────────────────
+
+import time as _time
+
+VAULT_TIMEOUT = 300
+
+
+def _vault_token():
+    """返回 token：优先从 header，其次 session"""
+    # 1. 从 X-Vault-Token header 取
+    token = request.headers.get("X-Vault-Token", "")
+    if token:
+        return token
+    # 2. 从 session 取
+    token = session.get("vault_token", "")
+    return token or None
+
+
+@api.route("/vault/unlock", methods=["POST"])
+def api_vault_unlock():
+    body = request.get_json(force=True) or {}
+    pwd = body.get("password", "")
+    token = vault.unlock(pwd)
+    if token:
+        session["vault_token"] = token
+        session.permanent = True
+        return jsonify({"ok": True, "token": token, "timeout": VAULT_TIMEOUT})
+    return jsonify({"ok": False, "message": "密码错误"}), 403
+
+
+@api.route("/vault/check")
+def api_vault_check():
+    token = _vault_token()
+    if not token:
+        return jsonify({"unlocked": False, "remaining": 0})
+    try:
+        vault._get_key(token)  # 验证 token 是否有效
+        return jsonify({"unlocked": True, "remaining": VAULT_TIMEOUT})
+    except Exception:
+        return jsonify({"unlocked": False, "remaining": 0})
+
+
+@api.route("/vault/items")
+def api_vault_items():
+    token = _vault_token()
+    if not token:
+        return jsonify({"ok": False, "message": "未解锁"}), 401
+    try:
+        return jsonify(vault.get_all(token))
+    except PermissionError:
+        return jsonify({"ok": False, "message": "未解锁或已超时"}), 401
+
+
+@api.route("/vault/items", methods=["POST"])
+def api_vault_add():
+    token = _vault_token()
+    if not token:
+        return jsonify({"ok": False, "message": "未解锁"}), 401
+    body = request.get_json(force=True) or {}
+    category = body.get("category", "").strip()
+    name = body.get("name", "").strip()
+    account = body.get("account", "").strip()
+    password = body.get("password", "").strip()
+    notes = body.get("notes", "").strip()
+    if not name:
+        return jsonify({"ok": False, "message": "名称不能为空"}), 400
+    if not password:
+        return jsonify({"ok": False, "message": "密码不能为空"}), 400
+    try:
+        doc = vault.add(token, category or "其他", name, account, password, notes or "")
+        return jsonify({"ok": True, "item": doc})
+    except PermissionError:
+        return jsonify({"ok": False, "message": "未解锁或已超时"}), 401
+
+
+@api.route("/vault/items/<item_id>", methods=["PUT"])
+def api_vault_update(item_id):
+    token = _vault_token()
+    if not token:
+        return jsonify({"ok": False, "message": "未解锁"}), 401
+    body = request.get_json(force=True) or {}
+    try:
+        doc = vault.update(
+            token, item_id,
+            category=body.get("category"),
+            name=body.get("name"),
+            account=body.get("account"),
+            password=body.get("password"),
+            notes=body.get("notes"),
+        )
+        if doc is None:
+            return jsonify({"ok": False, "message": "条目不存在"}), 404
+        return jsonify({"ok": True, "item": doc})
+    except PermissionError:
+        return jsonify({"ok": False, "message": "未解锁或已超时"}), 401
+
+
+@api.route("/vault/items/<item_id>", methods=["DELETE"])
+def api_vault_delete(item_id):
+    token = _vault_token()
+    if not token:
+        return jsonify({"ok": False, "message": "未解锁"}), 401
+    try:
+        if vault.delete(token, item_id):
+            return jsonify({"ok": True})
+        return jsonify({"ok": False, "message": "条目不存在"}), 404
+    except PermissionError:
+        return jsonify({"ok": False, "message": "未解锁或已超时"}), 401

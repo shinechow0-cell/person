@@ -19,6 +19,8 @@ def create_app():
     app.register_blueprint(api)
     app.register_blueprint(pages)
     app.config["TEMPLATES_AUTO_RELOAD"] = True
+    app.config["SECRET_KEY"] = os.environ.get("FLASK_SECRET_KEY", "dashboard-secret-key-2026")
+    app.config["SESSION_COOKIE_HTTPONLY"] = True
     return app
 
 

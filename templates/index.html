@@ -43,6 +43,7 @@
   <a class="quick-nav-item" href="#col-stocks" data-section="stocks">📈 A股市场 <span class="nav-arrow">→</span></a>
   <a class="quick-nav-item" href="#col-wiki" data-section="wiki">📚 读书笔记 <span class="nav-arrow">→</span></a>
   <a class="quick-nav-item" href="#col-family" data-section="family">🏠 家庭资料 <span class="nav-arrow">→</span></a>
+  <a class="quick-nav-item" href="#col-vault" data-section="vault">🔐 密码保险库 <span class="nav-arrow">→</span></a>
 </nav>
 
 <!-- ═══ 日期导航器 ═══ -->
@@ -113,6 +114,20 @@
     </div>
     <div class="card-body card-compact">
       <div id="family-preview">
+        <div class="skeleton skeleton-text"></div>
+        <div class="skeleton skeleton-text short"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ━━ 卡片 5: 🔐 密码保险库 · 摘要 ━━ -->
+  <div class="bento-card span-2" id="col-vault">
+    <div class="card-header">
+      <span class="card-icon">🔐</span> 密码保险库
+      <a href="/detail/vault" class="card-header-link">详情 →</a>
+    </div>
+    <div class="card-body card-compact">
+      <div id="vault-preview">
         <div class="skeleton skeleton-text"></div>
         <div class="skeleton skeleton-text short"></div>
       </div>
@@ -275,7 +290,7 @@ document.addEventListener('keydown', function(e) {
 
 // ═══ 全量加载 ═══
 async function loadAll() {
-  await Promise.all([loadJobs(), loadMarket(), loadWiki(), loadFamily()]);
+  await Promise.all([loadJobs(), loadMarket(), loadWiki(), loadFamily(), loadVault()]);
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -284,21 +299,36 @@ async function loadAll() {
 async function loadJobs() {
   try {
     const r = await fetch(`/api/jobs?date=${currentDate}`).then(r => r.json());
-    document.getElementById('job-num').textContent = r.count || 0;
+
+    // 过滤已下架岗位
+    const activeJobs = (r.jobs || []).filter(j => j.status !== '已下架');
+    const expiredCount = (r.jobs || []).length - activeJobs.length;
+
+    document.getElementById('job-num').textContent = activeJobs.length;
+    const totalNew = r.count || 0;
 
     const badge = document.getElementById('status-badge');
-    if (r.count > 0) { badge.textContent = `🆕 ${r.count} 新岗位`; badge.className = 'visible'; }
-    else { badge.className = ''; badge.textContent = ''; }
+    if (activeJobs.length > 0) {
+      badge.textContent = `🆕 ${activeJobs.length} 新岗位`;
+      if (expiredCount > 0) badge.textContent += ` (${expiredCount}已下架)`;
+      badge.className = 'visible';
+    } else if (totalNew > 0) {
+      badge.textContent = `📭 ${totalNew}个岗位已全部下架`;
+      badge.className = 'visible';
+    } else { badge.className = ''; badge.textContent = ''; }
 
-    if (!r.jobs || r.jobs.length === 0) {
-      document.getElementById('jobs-preview').innerHTML = '<div class="empty-state">当日无新增岗位</div>';
+    if (activeJobs.length === 0) {
+      const msg = totalNew > 0
+        ? `<div class="empty-state">当日${totalNew}个岗位已全部下架</div>`
+        : '<div class="empty-state">当日无新增岗位</div>';
+      document.getElementById('jobs-preview').innerHTML = msg;
       document.getElementById('job-summary-tags').innerHTML = '';
       return;
     }
 
-    // 按级别分组统计
+    // 按级别分组统计（仅活跃岗位）
     const byTag = {}; const tagOrder = ['🔥 高度匹配', '⭐ 推荐关注', '💡 可以看看', '📋 一般岗位'];
-    r.jobs.forEach(j => { const t = j.tag || '📋 一般岗位'; if (!byTag[t]) byTag[t] = []; byTag[t].push(j); });
+    activeJobs.forEach(j => { const t = j.tag || '📋 一般岗位'; if (!byTag[t]) byTag[t] = []; byTag[t].push(j); });
 
     // 摘要标签行
     let tagsHtml = '';
@@ -311,7 +341,7 @@ async function loadJobs() {
     document.getElementById('job-summary-tags').innerHTML = tagsHtml;
 
     // 仅显示前 5 条
-    const preview = r.jobs.slice(0, 5);
+    const preview = activeJobs.slice(0, 5);
     let html = '';
     preview.forEach(j => {
       const dl = j.deadline ? ` <span class="job-deadline">${j.deadline}</span>` : '';
@@ -320,7 +350,7 @@ async function loadJobs() {
         <span class="job-meta">${j.source} · ${j.score}分</span>
       </div>`;
     });
-    if (r.jobs.length > 5) html += `<div class="more-row">...还有 ${r.jobs.length - 5} 条</div>`;
+    if (activeJobs.length > 5) html += `<div class="more-row">...还有 ${activeJobs.length - 5} 条</div>`;
     document.getElementById('jobs-preview').innerHTML = html;
   } catch(e) { console.error(e); }
 }
@@ -467,6 +497,37 @@ async function checkMissingFiles(data) {
 }
 
 // ═══════════════════════════════════════════════════════════════
+// 密码保险库 · 摘要版
+// ═══════════════════════════════════════════════════════════════
+async function loadVault() {
+  try {
+    const cr = await fetch('/api/vault/check').then(r => r.json());
+    let html = '';
+    if (cr.unlocked) {
+      const r = await fetch('/api/vault/items').then(r => r.json());
+      const cats = r.categories || [];
+      const total = r.total || 0;
+      html = '<div class="summary-grid" style="grid-template-columns:repeat(auto-fill,minmax(80px,1fr));">';
+      if (cats.length > 0) {
+        cats.forEach(cat => {
+          const count = (r.items && r.items[cat]) ? r.items[cat].length : 0;
+          html += `<span class="summary-stat" style="cursor:default;">
+            <span class="summary-stat-num">${count}</span>
+            <span class="summary-stat-label">${cat}</span></span>`;
+        });
+      }
+      html += '</div>';
+      if (total > 0) {
+        html += `<div style="margin-top:8px;font-size:11px;color:var(--fg-muted);text-align:center;">${total} 条密码</div>`;
+      }
+    } else {
+      html = '<div style="text-align:center;padding:12px;color:var(--fg-muted);font-size:12px;">🔒 已锁定</div>';
+    }
+    document.getElementById('vault-preview').innerHTML = html;
+  } catch(e) { console.error(e); }
+}
+
+// ═══════════════════════════════════════════════════════════════
 // 执行状态 — 卡片内 + 检测面板
 // ═══════════════════════════════════════════════════════════════
 let _execData = {};
@@ -551,14 +612,20 @@ document.addEventListener('click', function(e) {
 });
 
 let _pollTimer = null;
+let _validationTriggered = false;
 function pollExecStatus(type) {
   if (_pollTimer) clearInterval(_pollTimer);
+  _validationTriggered = false;
   _pollTimer = setInterval(async () => {
     const r = await fetch('/api/execution-status').then(r => r.json());
     _execData = r;
     updateCardStatus('jobs', r.jobs);
     updateCardStatus('stocks', r.stocks);
     updateCheckPanel();
+    if (r.jobs.done && !_validationTriggered) {
+      _validationTriggered = true;
+      fetch('/api/trigger/validate-jobs', { method: 'POST' }).catch(() => {});
+    }
     if (r.jobs.done && r.stocks.done) { clearInterval(_pollTimer); _pollTimer = null; loadAll(); }
   }, 3000);
 }

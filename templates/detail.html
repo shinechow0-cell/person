@@ -72,6 +72,7 @@ async function init() {
     case 'stocks': await loadStocksDetail(); break;
     case 'wiki': await loadWikiDetail(); break;
     case 'family': await loadFamilyDetail(); break;
+    case 'vault': await loadVaultDetail(); break;
   }
 }
 
@@ -130,6 +131,16 @@ function renderConfig() {
         ['添加资料', '子项 + 分类 + 文件地址', '分类自由输入，group 来自按钮上下文'],
         ['数据层级', '大类 → 子项 → 分类 → 文档', ''],
       ]
+    },
+    vault: {
+      icon: '\u{1f510}',
+      items: [
+        ['数据文件', 'data/vault.json.enc', 'AES-256-GCM 加密，不可直接编辑'],
+        ['字段', '{id, category, name, account, password, notes, created_at}', '加密存储在磁盘上'],
+        ['主密码', '首次使用任意密码，二次需一致', '密码不对无法解密'],
+        ['锁定时间', '5 分钟无操作自动锁定', '关浏览器即锁'],
+        ['密码显示', '默认 ****，点击 👁 显示 10 秒', '10 秒后自动遮盖'],
+      ]
     }
   };
 
@@ -161,55 +172,144 @@ function renderConfig() {
 // ═══════════════════════════════════════════════════════════════
 async function loadJobsDetail() {
   try {
-    const r = await fetch(`/api/jobs?date=${today}`).then(r => r.json());
+    const r = await fetch('/api/jobs?date=all').then(r => r.json());
+    window._jobsData = r;
+    const dates = r.dates || [];
     document.getElementById('detail-meta').textContent =
-      `日期: ${r.date} · 共 ${r.count} 个岗位`;
+      `${dates.length} 个日期 · 共 ${r.total || 0} 个岗位`;
 
-    if (!r.jobs || r.jobs.length === 0) {
-      document.getElementById('detail-content').innerHTML =
-        '<div class="detail-card"><div class="detail-card-body"><div class="empty-state"><span class="empty-icon">📭</span>暂无岗位数据</div></div></div>';
-      return;
+    let html = `<div class="fam-filter-bar">
+      <span class="fam-filter-label">📅 日期</span>
+      <select id="job-date-filter" class="fam-select" onchange="refreshJobTable()" style="min-width:140px;">
+        <option value="">全部日期</option>
+        ${dates.map(d => `<option value="${d}">${d}</option>`).join('')}
+      </select>
+      <span class="fam-filter-label" style="margin-left:var(--space-3);">🎯 级别</span>
+      <select id="job-tag-filter" class="fam-select" onchange="refreshJobTable()" style="min-width:120px;">
+        <option value="">全部级别</option>
+        <option value="🔥 高度匹配">🔥 高度匹配</option>
+        <option value="⭐ 推荐关注">⭐ 推荐关注</option>
+        <option value="💡 可以看看">💡 可以看看</option>
+        <option value="📋 一般岗位">📋 一般岗位</option>
+      </select>
+      <label style="display:flex;align-items:center;gap:4px;margin-left:var(--space-3);font-size:12px;color:var(--fg-secondary);cursor:pointer;">
+        <input type="checkbox" id="job-show-skip" onchange="refreshJobTable()"> 显示不考虑
+      </label>
+      <label style="display:flex;align-items:center;gap:4px;margin-left:var(--space-3);font-size:12px;color:var(--fg-secondary);cursor:pointer;">
+        <input type="checkbox" id="job-show-expired" onchange="refreshJobTable()"> 显示已下架
+      </label>
+      <span id="job-filter-result" class="fam-filter-result" style="margin-left:auto;"></span>
+    </div>`;
+
+    html += renderJobTable();
+    document.getElementById('detail-content').innerHTML = html;
+    // 初始应用过滤（隐藏「不考虑」行等）
+    refreshJobTable();
+  } catch(e) { console.error(e); }
+}
+
+function refreshJobTable() {
+  const table = document.querySelector('.job-table-full');
+  if (!table) {
+    // 表格不存在（异常情况），重新渲染整个区块然后应用过滤
+    const container = document.querySelector('#detail-content .detail-card');
+    if (container) {
+      container.outerHTML = renderJobTable();
     }
+    return;
+  }
+  const showSkip = document.getElementById('job-show-skip')?.checked || false;
+  const showExpired = document.getElementById('job-show-expired')?.checked || false;
+  const dateVal = document.getElementById('job-date-filter')?.value || '';
+  const tagVal = document.getElementById('job-tag-filter')?.value || '';
+  let count = 0;
+  table.querySelectorAll('tbody tr').forEach(row => {
+    const rowStatus = row.dataset.status || '';
+    const isSkip = rowStatus === '不考虑';
+    const isExpired = rowStatus === '已下架';
+    const tag = row.dataset.tag || '';
+    const date = row.dataset.date || '';
+    let show = true;
+    if (!showSkip && isSkip) show = false;
+    if (!showExpired && isExpired) show = false;
+    if (tagVal && tag !== tagVal) show = false;
+    if (dateVal && date !== dateVal) show = false;
+    row.style.display = show ? '' : 'none';
+    if (show) count++;
+  });
+  const result = document.getElementById('job-filter-result');
+  if (result) result.textContent = count + ' 个岗位';
+}
 
-    const tagOrder = ['🔥 高度匹配', '⭐ 推荐关注', '💡 可以看看', '📋 一般岗位'];
-    const byTag = {};
-    r.jobs.forEach(j => {
-      const tag = j.tag || '📋 一般岗位';
-      if (!byTag[tag]) byTag[tag] = [];
-      byTag[tag].push(j);
+function renderJobTable() {
+  const d = window._jobsData;
+  if (!d) return '';
+  const all = d.by_date || {};
+
+  // 始终渲染全部行（不做任何过滤），过滤由 refreshJobTable() 通过 show/hide 控制
+  let rows = [];
+  (d.dates || []).forEach(date => {
+    (all[date] || []).forEach(j => {
+      rows.push({ ...j, _date: date });
     });
+  });
 
-    let html = '';
-    tagOrder.forEach(tag => {
-      const jobs = byTag[tag];
-      if (!jobs || jobs.length === 0) return;
-      const tagClass = tag.includes('🔥') ? 'td-tag-fire' :
-                       tag.includes('⭐') ? 'td-tag-star' :
-                       tag.includes('💡') ? 'td-tag-light' : 'td-tag-general';
-      html += `<div class="detail-card">
-        <div class="detail-card-header">${tag} · ${jobs.length} 个</div>
-        <div class="detail-card-body" style="padding:0;overflow-x:auto;">
-          <table class="job-table">
-            <thead><tr>
-              <th>岗位名称</th><th>来源</th><th>匹配分</th><th>截止</th><th>邮箱</th>
-            </tr></thead>
-            <tbody>`;
-      jobs.forEach(j => {
-        const dl = j.deadline || '-';
-        const email = j.emails && j.emails.length > 0 ? j.emails.join(', ') : '-';
-        html += `<tr>
+  if (rows.length === 0) {
+    return '<div class="detail-card"><div class="detail-card-body"><div class="empty-state"><span class="empty-icon">📭</span>暂无岗位数据</div></div></div>';
+  }
+
+  // 按日期降序、分数降序
+  rows.sort((a, b) => b._date.localeCompare(a._date) || b.score - a.score);
+
+  return `<div class="detail-card" style="overflow-x:auto;">
+    <table class="job-table job-table-full">
+      <thead><tr>
+        <th>日期</th><th>岗位名称</th><th>来源</th><th>匹配分</th><th>级别</th><th>截止</th><th>状态</th>
+      </tr></thead>
+      <tbody>
+      ${rows.map(j => {
+        const tagCls = j.tag.includes('🔥') ? 'td-tag-fire' : j.tag.includes('⭐') ? 'td-tag-star' : j.tag.includes('💡') ? 'td-tag-light' : 'td-tag-general';
+        const hiddenStatuses = ['不考虑', '已下架'];
+        const skipCls = hiddenStatuses.includes(j.status) ? ' job-row-skipped' : '';
+        return `<tr class="${skipCls}" id="job-row-${j.id}" data-score="${j.score}" data-tag="${j.tag}" data-date="${j._date}" data-status="${j.status || ''}">
+          <td class="text-mono" style="white-space:nowrap;">${j._date}</td>
           <td><a href="${j.link}" target="_blank" rel="noopener">${j.title}</a></td>
           <td>${j.source}</td>
-          <td><span class="text-mono">${j.score}</span></td>
-          <td>${dl}</td>
-          <td style="font-size:11px;color:var(--fg-muted);">${email}</td>
+          <td class="text-mono">${j.score}</td>
+          <td><span class="td-tag ${tagCls}">${j.tag}</span></td>
+          <td style="white-space:nowrap;font-size:11px;">${j.deadline || '-'}</td>
+          <td style="white-space:nowrap;">
+            <select onchange="setJobStatus('${j.id}', this.value)" class="job-status-select" style="font-size:11px;padding:2px 6px;border-radius:4px;border:1px solid var(--border-default);background:var(--bg-surface);color:var(--fg-primary);">
+              <option value="" ${!j.status?'selected':''}>-</option>
+              <option value="不考虑" ${j.status==='不考虑'?'selected':''}>不考虑</option>
+              <option value="已下架" ${j.status==='已下架'?'selected':''}>已下架</option>
+            </select>
+          </td>
         </tr>`;
-      });
-      html += '</tbody></table></div></div>';
-    });
+      }).join('')}
+      </tbody>
+    </table>
+  </div>`;
+}
 
-    document.getElementById('detail-content').innerHTML = html;
-  } catch(e) { console.error(e); }
+async function setJobStatus(jobId, status) {
+  await fetch(`/api/jobs/${jobId}/status`, {
+    method: 'PUT', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({status}),
+  });
+  // 更新本地数据
+  if (window._jobsData) {
+    Object.values(window._jobsData.by_date).forEach(arr => {
+      arr.forEach(j => { if (j.id === jobId) j.status = status; });
+    });
+  }
+  const row = document.getElementById('job-row-' + jobId);
+  if (row) {
+    const hiddenStatuses = ['不考虑', '已下架'];
+    row.classList.toggle('job-row-skipped', hiddenStatuses.includes(status));
+    row.dataset.status = status;
+  }
+  refreshJobTable();
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -493,6 +593,7 @@ function renderFamilyDocs() {
   }
 
   // ── 大类模块卡片 ──
+  html += '<div class="fam-group-grid">';
   d.groups.forEach((group, gi) => {
     const items = (d.items_by_group && d.items_by_group[group]) ? d.items_by_group[group] : [];
     const meta = groupMeta(group);
@@ -533,23 +634,24 @@ function renderFamilyDocs() {
         const itemTotal = cats.reduce((s, c) => s + itemDocs[c].length, 0);
 
         html += `<div class="fam-item-card" data-item="${escAttr(item)}">
-          <div class="fam-item-card-header">
+          <div class="fam-item-card-header" onclick="this.parentElement.classList.toggle('expanded')" style="cursor:pointer;">
             <span class="fam-item-avatar">${meta.icon}</span>
             <span class="fam-item-card-name">${escHtml(item)}</span>
             <span class="fam-item-card-count">${itemTotal} 份</span>
-            <div class="fam-item-actions">
+            <span class="fam-item-expand">▶</span>
+            <div class="fam-item-actions" onclick="event.stopPropagation()">
               <button class="fam-action-btn fam-edit-btn" onclick="renameFamilyItem('${escAttr(group)}','${escAttr(item)}')" title="重命名">✏️</button>
               <button class="fam-action-btn fam-del-btn" onclick="deleteFamilyItem('${escAttr(group)}','${escAttr(item)}')" title="删除">🗑</button>
             </div>
           </div>`;
 
         if (cats.length === 0) {
-          html += '<div class="fam-item-card-body"><div class="empty-state" style="padding:10px;font-size:11px;">暂无资料</div></div>';
+          html += '<div class="fam-item-card-body" style="display:none;"><div class="empty-state" style="padding:10px;font-size:11px;">暂无资料</div></div>';
         } else {
           const CAT_ORDER = ['身份证', '学历证书', '户口本', '结婚证', '房产证', '护照', '行驶证', '驾驶证'];
           const orderedCats = [...new Set([...CAT_ORDER.filter(c => cats.includes(c)), ...cats.filter(c => !CAT_ORDER.includes(c))])];
 
-          html += '<div class="fam-item-card-body">';
+          html += '<div class="fam-item-card-body" style="display:none;">';
           orderedCats.forEach(cat => {
             if (!itemDocs[cat] || !itemDocs[cat].length) return;
             const docs = itemDocs[cat];
@@ -561,10 +663,10 @@ function renderFamilyDocs() {
 
             docs.forEach(doc => {
               const info = doc._fileInfo;
-              const hasPreview = info && info.exists && (info.is_image || info.is_pdf);
+              const hasPreview = info && info.exists && (info.is_image || info.is_pdf || info.is_md);
               const sizeStr = info && info.size ? formatFileSize(info.size) : '';
               html += `<div class="fam-doc-row" id="fam-doc-${doc.id}" data-category="${escAttr(doc.category)}">
-                <span class="fam-doc-icon">${info && info.is_image ? '🖼️' : info && info.is_pdf ? '📕' : '📄'}</span>
+                <span class="fam-doc-icon">${info && info.is_image ? '🖼️' : info && info.is_pdf ? '📕' : info && info.is_md ? '📝' : '📄'}</span>
                 <span class="fam-doc-name">${escHtml(doc.name)}</span>
                 <span class="fam-doc-path">${escHtml(doc.file_path)}</span>
                 ${sizeStr ? `<span class="fam-doc-size">${sizeStr}</span>` : ''}
@@ -590,6 +692,7 @@ function renderFamilyDocs() {
 
     html += '</div></div>'; // /fam-module-body & /fam-module
   });
+  html += '</div>'; // /fam-group-grid
 
   document.getElementById('detail-content').innerHTML = html;
   loadFamilyFileInfo();
@@ -692,6 +795,7 @@ function collectAllDocs() {
 
 async function loadFamilyFileInfo() {
   const docs = collectAllDocs();
+  const missingCards = new Set();  // 追踪有缺失文件的子项卡片
   for (const doc of docs) {
     try {
       const r = await fetch(`/api/family/preview?path=${encodeURIComponent(doc.file_path)}`).then(r => r.json());
@@ -702,7 +806,7 @@ async function loadFamilyFileInfo() {
       const info = r.info;
       // 图标
       const iconEl = el.querySelector('.fam-doc-icon');
-      if (iconEl) iconEl.textContent = info.is_image ? '🖼️' : info.is_pdf ? '📕' : '📄';
+      if (iconEl) iconEl.textContent = info.is_image ? '🖼️' : info.is_pdf ? '📕' : info.is_md ? '📝' : '📄';
       // 文件大小
       let sizeEl = el.querySelector('.fam-doc-size');
       if (info.exists && info.size) {
@@ -719,9 +823,12 @@ async function loadFamilyFileInfo() {
           missEl = document.createElement('span'); missEl.className = 'fam-doc-missing'; missEl.textContent = '⚠ 文件不存在';
           el.insertBefore(missEl, el.querySelector('.fam-doc-actions'));
         }
+        // 标记父级子项卡片
+        const card = el.closest('.fam-item-card');
+        if (card) missingCards.add(card);
       } else if (missEl) { missEl.remove(); }
       // 预览按钮
-      const hasPreview = info.exists && (info.is_image || info.is_pdf);
+      const hasPreview = info.exists && (info.is_image || info.is_pdf || info.is_md);
       const actions = el.querySelector('.fam-doc-actions');
       let previewBtn = actions ? actions.querySelector('.fam-preview-btn') : null;
       if (hasPreview && !previewBtn) {
@@ -733,6 +840,19 @@ async function loadFamilyFileInfo() {
       } else if (!hasPreview && previewBtn) { previewBtn.remove(); }
     } catch(e) { /* ignore */ }
   }
+  // 对有缺失文件的子项卡片：自动展开 + 头部标记
+  missingCards.forEach(card => {
+    const count = card.querySelector('.fam-item-card-count');
+    if (count && !count.querySelector('.fam-missing-dot')) {
+      count.insertAdjacentHTML('beforeend', ' <span class="fam-missing-dot" title="有文件缺失">⚠</span>');
+    }
+    // 自动展开
+    card.classList.add('expanded');
+    const body = card.querySelector('.fam-item-card-body');
+    if (body) body.style.display = '';
+    const arrow = card.querySelector('.fam-item-expand');
+    if (arrow) arrow.textContent = '▼';
+  });
 }
 
 function formatFileSize(bytes) {
@@ -941,7 +1061,7 @@ function previewFamilyFile(filePath) {
   const overlay = document.createElement('div');
   overlay.className = 'fam-modal-overlay'; overlay.id = 'fam-preview-overlay';
   overlay.innerHTML = `<div class="fam-modal fam-preview-modal">
-    <div class="fam-modal-header"><span>📄 文件预览</span><button class="fam-modal-close" id="fam-preview-close-btn">✕</button></div>
+    <div class="fam-modal-header"><span>📄 文件预览</span><div class="fam-modal-header-right"><span id="md-header-actions"></span><button class="fam-modal-close" id="fam-preview-close-btn">✕</button></div></div>
     <div class="fam-preview-body">
       <div class="fam-preview-path">${escHtml(filePath)}</div>
       <div class="fam-preview-content" id="fam-preview-content"><div class="empty-state">加载中...</div></div>
@@ -956,11 +1076,65 @@ function previewFamilyFile(filePath) {
     const fi=info.info, url=`/api/family/file?path=${encodeURIComponent(filePath)}`;
     if (fi.is_image) document.getElementById('fam-preview-content').innerHTML=`<img src="${url}" class="fam-preview-img" onclick="this.classList.toggle('fam-preview-zoomed')">`;
     else if (fi.is_pdf) document.getElementById('fam-preview-content').innerHTML=`<iframe src="${url}" class="fam-preview-pdf"></iframe>`;
+    else if (fi.is_md) renderMdPreview(filePath);
     else document.getElementById('fam-preview-content').innerHTML=`<div class="empty-state"><span class="empty-icon">📄</span><p>无法预览 (${fi.suffix})</p><a href="${url}" target="_blank" class="fam-download-link">⬇ 下载/打开</a></div>`;
   }).catch(()=>{ document.getElementById('fam-preview-content').innerHTML='<div class="empty-state">加载失败</div>'; });
 }
 
 function closeFamilyPreview() { const o = document.getElementById('fam-preview-overlay'); if (o) o.remove(); }
+
+// ── Markdown 预览 + 编辑器 ──
+let _mdFilePath = '', _mdRaw = '';
+
+function renderMdPreview(filePath) {
+  const container = document.getElementById('fam-preview-content');
+  container.style.cssText = 'align-items:stretch;justify-content:flex-start;padding:0;';
+  container.innerHTML = '<div class="empty-state">加载中...</div>';
+
+  fetch(`/api/family/markdown?path=${encodeURIComponent(filePath)}`)
+    .then(r => r.json())
+    .then(d => {
+      if (!d.ok) { container.innerHTML = `<div class="empty-state"><span class="empty-icon">⚠️</span>${escHtml(d.message||'加载失败')}</div>`; return; }
+      _mdFilePath = filePath;
+      _mdRaw = d.raw;
+      showMdView(d.html);
+    })
+    .catch(() => { container.innerHTML = '<div class="empty-state">加载失败</div>'; });
+}
+
+function showMdView(html) {
+  document.getElementById('md-header-actions').innerHTML =
+    '<button class="md-header-btn" onclick="showMdEditor()">✏️ 编辑</button>';
+  const container = document.getElementById('fam-preview-content');
+  container.innerHTML = `<div class="md-preview-area">${html}</div>`;
+}
+
+function showMdEditor() {
+  document.getElementById('md-header-actions').innerHTML =
+    '<button class="md-header-btn md-primary" onclick="saveMdFile()">💾 保存</button>';
+  const container = document.getElementById('fam-preview-content');
+  container.innerHTML = `<textarea class="md-editor-textarea" id="md-editor-textarea" spellcheck="false">${escHtml(_mdRaw)}</textarea>`;
+  const ta = document.getElementById('md-editor-textarea');
+  if (ta) { ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length); }
+}
+
+async function saveMdFile() {
+  const textarea = document.getElementById('md-editor-textarea');
+  const content = textarea ? textarea.value : _mdRaw;
+  try {
+    const r = await fetch('/api/family/markdown', {
+      method: 'PUT',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({path: _mdFilePath, content}),
+    }).then(r => r.json());
+    if (r.ok) {
+      _mdRaw = content;
+      renderMdPreview(_mdFilePath);
+    } else {
+      alert('保存失败: ' + (r.message || '未知错误'));
+    }
+  } catch(e) { alert('保存出错: ' + e.message); }
+}
 
 // ── JSON 配置编辑器 ──
 async function showConfigEditor() {
@@ -1047,6 +1221,273 @@ function closeConfigEditor() {
 document.addEventListener('keydown', function(e) {
   if (e.key === 'Escape') { closeFamilyForm(); closeFamilyPreview(); closePrompt(); closeConfigEditor(); }
 });
+
+// ═══════════════════════════════════════════════════════════════
+// 密码保险库 — 主密码门 + 密码列表（点击 👁 显示 10 秒）
+// ═══════════════════════════════════════════════════════════════
+let _vaultTimer = null, _vaultRemaining = 0, _vaultToken = '';
+
+function vaultHeaders() {
+  return _vaultToken ? {'Content-Type':'application/json', 'X-Vault-Token': _vaultToken} : {'Content-Type':'application/json'};
+}
+
+async function loadVaultDetail() {
+  _vaultToken = sessionStorage.getItem('vault_token') || '';
+  if (!_vaultToken) {
+    renderVaultLock();
+    return;
+  }
+  // 验证 token 是否有效
+  const cr = await fetch('/api/vault/check', { headers: vaultHeaders() }).then(r => r.json());
+  if (!cr.unlocked) {
+    _vaultToken = ''; sessionStorage.removeItem('vault_token');
+    renderVaultLock();
+    return;
+  }
+  _vaultRemaining = cr.remaining || 300;
+  document.getElementById('detail-meta').textContent = '已解锁';
+  await renderVaultItems();
+  startVaultTimer();
+}
+
+function renderVaultLock() {
+  _vaultToken = ''; sessionStorage.removeItem('vault_token');
+  if (_vaultTimer) { clearInterval(_vaultTimer); _vaultTimer = null; }
+  document.getElementById('detail-meta').textContent = '🔒 已锁定';
+  document.getElementById('detail-content').innerHTML = `
+    <div class="vault-lock-card">
+      <div class="vault-lock-icon">🔐</div>
+      <h2>密码保险库</h2>
+      <p>请输入主密码解锁</p>
+      <div class="vault-lock-form">
+        <input type="password" id="vault-pwd-input" placeholder="主密码" autofocus
+          onkeydown="if(event.key==='Enter')unlockVault()">
+        <button class="fam-btn-save" onclick="unlockVault()">解锁</button>
+      </div>
+      <div id="vault-lock-msg" style="color:var(--danger);margin-top:8px;font-size:12px;min-height:18px;"></div>
+    </div>`;
+  document.getElementById('vault-pwd-input').focus();
+}
+
+async function unlockVault() {
+  const pwd = document.getElementById('vault-pwd-input').value;
+  const r = await fetch('/api/vault/unlock', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({password: pwd}),
+  }).then(r => r.json());
+  if (r.ok && r.token) {
+    _vaultToken = r.token;
+    sessionStorage.setItem('vault_token', r.token);
+    _vaultRemaining = r.timeout || 300;
+    await renderVaultItems();
+    startVaultTimer();
+  } else {
+    document.getElementById('vault-lock-msg').textContent = '❌ ' + (r.message || '密码错误');
+    document.getElementById('vault-pwd-input').value = '';
+    document.getElementById('vault-pwd-input').focus();
+  }
+}
+
+function startVaultTimer() {
+  if (_vaultTimer) clearInterval(_vaultTimer);
+  _vaultTimer = setInterval(() => {
+    _vaultRemaining--;
+    document.getElementById('detail-meta').textContent =
+      '已解锁 · ' + Math.floor(_vaultRemaining / 60) + '分' + (_vaultRemaining % 60) + '秒后锁定';
+    if (_vaultRemaining <= 0) {
+      clearInterval(_vaultTimer); _vaultTimer = null;
+      _vaultToken = ''; sessionStorage.removeItem('vault_token');
+      document.getElementById('detail-content').innerHTML =
+        '<div class="empty-state"><span class="empty-icon">🔒</span>已自动锁定，请刷新页面</div>';
+      document.getElementById('detail-meta').textContent = '🔒 已锁定';
+    }
+  }, 1000);
+}
+
+async function renderVaultItems() {
+  const r = await fetch('/api/vault/items', { headers: vaultHeaders() }).then(r => r.json());
+  // API 返回未解锁 → 回到锁屏
+  if (r.ok === false || r.message === '未解锁' || r.message === '未解锁或已超时') {
+    clearInterval(_vaultTimer);
+    renderVaultLock();
+    return;
+  }
+  const cats = r.categories || [];
+  let html = `<div class="fam-filter-bar">
+    <span class="fam-filter-label">🔍 筛选</span>
+    <select id="vault-filter-cat" class="fam-select" onchange="filterVaultItems()" style="min-width:130px;">
+      <option value="">全部分类</option>
+      ${cats.map(c => `<option value="${escAttr(c)}">${escHtml(c)}</option>`).join('')}
+    </select>
+    <button class="fam-add-btn" onclick="showVaultForm()" style="margin-left:auto;padding:6px 16px;font-size:12px;">➕ 添加密码</button>
+  </div>`;
+
+  const CAT_ICONS = { '银行卡': '💳', 'WiFi': '📶', 'APP登录': '📱', '网站': '🌐', '其他': '🔑' };
+  const CAT_COLORS = { '银行卡': '#f59e0b', 'WiFi': '#22c55e', 'APP登录': '#3b82f6', '网站': '#8b5cf6', '其他': '#64748b' };
+
+  html += '<div class="vault-grid">';
+
+  cats.forEach(cat => {
+    const items = (r.items && r.items[cat]) ? r.items[cat] : [];
+    if (items.length === 0) return;
+    const icon = CAT_ICONS[cat] || '🔑';
+    const color = CAT_COLORS[cat] || '#64748b';
+
+    html += `<div class="fam-module vault-module-card" data-cat="${escAttr(cat)}" style="--mod-color:${color};--mod-bg:${color}10;">
+      <div class="fam-module-header">
+        <div class="fam-module-title">
+          <span class="fam-module-icon">${icon}</span>
+          <div class="fam-module-text">
+            <span class="fam-module-name">${escHtml(cat)}</span>
+            <span class="fam-module-stat">${items.length} 条</span>
+          </div>
+        </div>
+      </div>
+      <div class="fam-module-body">`;
+    items.forEach(item => {
+      html += `<div class="vault-item-row" id="vault-${item.id}" data-notes="${escAttr(item.notes||'')}">
+        <span class="vault-item-name">${escHtml(item.name)}</span>
+        ${item.account ? `<span class="vault-item-account">${escHtml(item.account)}</span>` : ''}
+        <span class="vault-item-pwd" id="vault-pwd-${item.id}">****</span>
+        <span class="vault-item-actions">
+          <button class="fam-action-btn" onclick="toggleVaultPwd('${item.id}')" title="显示/隐藏" style="font-size:16px;">👁</button>
+          <button class="fam-action-btn fam-edit-btn" onclick="showVaultForm('${item.id}')">✏️</button>
+          <button class="fam-action-btn fam-del-btn" onclick="deleteVaultItem('${item.id}')">🗑</button>
+        </span>
+      </div>`;
+    });
+    html += '</div></div>';
+  });
+
+  html += '</div>'; // /vault-grid
+
+  if (cats.length === 0) {
+    html += '<div class="empty-state"><span class="empty-icon">🔐</span>暂无密码，点击上方按钮添加</div>';
+  }
+
+  document.getElementById('detail-content').innerHTML = html;
+
+  // 存原始密码到 dataset
+  if (r.items) {
+    Object.values(r.items).forEach(arr => arr.forEach(item => {
+      const el = document.getElementById('vault-pwd-' + item.id);
+      if (el) el.dataset.password = item.password;
+    }));
+  }
+}
+
+function toggleVaultPwd(itemId) {
+  const el = document.getElementById('vault-pwd-' + itemId);
+  if (!el) return;
+  if (el.textContent === '****') {
+    el.textContent = el.dataset.password || '';
+    el.classList.add('visible');
+    // 10 秒后自动遮盖
+    clearTimeout(el._hideTimer);
+    el._hideTimer = setTimeout(() => {
+      el.textContent = '****';
+      el.classList.remove('visible');
+    }, 10000);
+  } else {
+    el.textContent = '****';
+    el.classList.remove('visible');
+    clearTimeout(el._hideTimer);
+  }
+}
+
+function filterVaultItems() {
+  const val = document.getElementById('vault-filter-cat').value;
+  document.querySelectorAll('.vault-module-card').forEach(b => {
+    b.style.display = !val || b.dataset.cat === val ? '' : 'none';
+  });
+}
+
+function showVaultForm(itemId) {
+  let doc = null, title = '添加密码';
+  if (itemId) {
+    const pwdEl = document.getElementById('vault-pwd-' + itemId);
+    const row = document.getElementById('vault-' + itemId);
+    const catBlock = row ? row.closest('.vault-module-card') : null;
+    doc = {
+      id: itemId,
+      category: catBlock ? catBlock.dataset.cat : '',
+      name: row ? row.querySelector('.vault-item-name').textContent : '',
+      account: row ? (row.querySelector('.vault-item-account')?.textContent || '') : '',
+      password: pwdEl ? (pwdEl.dataset.password || '') : '',
+      notes: row ? (row.dataset.notes || '') : '',
+    };
+    title = '编辑密码';
+  }
+
+  const cats = ['银行卡', 'WiFi', 'APP登录', '网站', '其他'];
+  const cVal = doc ? (doc.category || '') : '';
+  const nVal = doc ? doc.name : '';
+  const aVal = doc ? (doc.account || '') : '';
+  const pVal = doc ? (doc.password || '') : '';
+
+  const overlay = document.createElement('div');
+  overlay.className = 'fam-modal-overlay'; overlay.id = 'fam-modal-overlay';
+  overlay.innerHTML = `<div class="fam-modal" style="max-width:420px;">
+    <div class="fam-modal-header"><span>${title}</span><button class="fam-modal-close" id="vault-form-close-btn">✕</button></div>
+    <div class="fam-modal-body">
+      <div class="fam-form-row">
+        <label class="fam-field" style="flex:1"><span>分类</span>
+          <input type="text" id="vault-form-cat" placeholder="银行卡 / WiFi / APP登录 / ..." value="${escAttr(cVal)}" list="vault-cat-list" autocomplete="off">
+          <datalist id="vault-cat-list">${cats.map(c => `<option value="${c}">`).join('')}</datalist>
+        </label>
+        <label class="fam-field" style="flex:1"><span>名称 <em>(必填)</em></span>
+          <input type="text" id="vault-form-name" placeholder="招行储蓄卡" value="${escAttr(nVal)}"></label>
+      </div>
+      <div class="fam-form-row">
+        <label class="fam-field" style="flex:1"><span>账号</span>
+          <input type="text" id="vault-form-account" placeholder="卡号 / 手机号 / 用户名" value="${escAttr(aVal)}"></label>
+        <label class="fam-field" style="flex:1"><span>密码 <em>(必填)</em></span>
+          <input type="text" id="vault-form-pwd" placeholder="密码" value="${escAttr(pVal)}"></label>
+      </div>
+      <label class="fam-field"><span>备注</span>
+        <input type="text" id="vault-form-notes" placeholder="可选" value="${escAttr(doc ? (doc.notes || '') : '')}"></label>
+    </div>
+    <div class="fam-modal-footer">
+      <button class="fam-btn-cancel" id="vault-cancel-btn">取消</button>
+      <button class="fam-btn-save" id="vault-save-btn">保存</button>
+    </div>
+  </div>`;
+  document.body.appendChild(overlay);
+  overlay.addEventListener('click', e => { if (e.target === overlay) closeFamilyForm(); });
+  document.getElementById('vault-form-close-btn').addEventListener('click', closeFamilyForm);
+  document.getElementById('vault-cancel-btn').addEventListener('click', closeFamilyForm);
+  document.getElementById('vault-save-btn').addEventListener('click', () => saveVaultItem(itemId || ''));
+  document.getElementById('vault-form-name').focus();
+}
+
+async function saveVaultItem(itemId) {
+  const category = document.getElementById('vault-form-cat').value.trim();
+  const name = document.getElementById('vault-form-name').value.trim();
+  const account = document.getElementById('vault-form-account').value.trim();
+  const password = document.getElementById('vault-form-pwd').value.trim();
+  const notes = document.getElementById('vault-form-notes').value.trim();
+
+  if (!name) { alert('请输入名称'); return; }
+  if (!password) { alert('请输入密码'); return; }
+
+  const body = { category, name, account, password, notes };
+  const url = itemId ? `/api/vault/items/${itemId}` : '/api/vault/items';
+  const method = itemId ? 'PUT' : 'POST';
+  const r = await fetch(url, { method, headers: vaultHeaders(), body: JSON.stringify(body) }).then(r => r.json());
+  if (r.ok || r.item) {
+    closeFamilyForm();
+    await renderVaultItems();
+  } else {
+    alert(r.message || '保存失败');
+  }
+}
+
+async function deleteVaultItem(itemId) {
+  if (!confirm('确定删除这条密码吗？')) return;
+  const r = await fetch(`/api/vault/items/${itemId}`, { method: 'DELETE', headers: vaultHeaders() }).then(r => r.json());
+  if (r.ok) await renderVaultItems();
+  else alert(r.message || '删除失败');
+}
 
 init();
 </script>

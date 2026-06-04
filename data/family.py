@@ -252,10 +252,11 @@ def get_file_info(rel_path: str) -> dict | None:
     if not p.is_absolute():
         p = Path.home() / rel_path
     if not p.exists() or not p.is_file():
-        return {"path": str(p), "exists": False, "suffix": "", "size": 0, "is_image": False, "is_pdf": False}
+        return {"path": str(p), "exists": False, "suffix": "", "size": 0, "is_image": False, "is_pdf": False, "is_md": False}
     suffix = p.suffix.lower()
     image_exts = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".svg"}
     return {
         "path": str(p), "exists": True, "suffix": suffix,
         "size": p.stat().st_size, "is_image": suffix in image_exts, "is_pdf": suffix == ".pdf",
+        "is_md": suffix == ".md",
     }

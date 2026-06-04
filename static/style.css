@@ -1241,6 +1241,48 @@ body[data-view="mobile"] .bento-grid {
 }
 @media (max-width: 800px) { .wiki-split { grid-template-columns: 1fr; } }
 
+/* ── Modal header actions ── */
+.fam-modal-header-right { display:flex; align-items:center; gap:8px; }
+.md-header-btn {
+  font-size: 12px; padding: 4px 12px;
+  border: 1px solid var(--border-subtle); border-radius: var(--radius-sm);
+  background: transparent; color: var(--fg-secondary); cursor: pointer;
+  transition: all var(--duration-fast) var(--ease-out);
+  white-space: nowrap; line-height: 1.4;
+}
+.md-header-btn:hover { border-color: var(--border-default); color: var(--fg-primary); background: var(--bg-surface); }
+.md-header-btn.md-primary { color: var(--accent); border-color: var(--accent); }
+.md-header-btn.md-primary:hover { background: var(--accent); color: #fff; }
+
+/* ── Markdown 编辑器 ── */
+.md-preview-area {
+  flex:1; overflow-y:auto; padding: 16px 96px; line-height: 1.9;
+  color: var(--fg-primary);
+}
+.md-preview-area h1 { font-size: 24px; margin: 24px 0 16px; color: var(--fg-primary); border-bottom: 2px solid var(--border-default); padding-bottom: 10px; }
+.md-preview-area h2 { font-size: 20px; margin: 22px 0 12px; color: var(--fg-primary); }
+.md-preview-area h3 { font-size: 17px; margin: 18px 0 8px; color: var(--fg-secondary); }
+.md-preview-area p { margin: 0 0 12px; }
+.md-preview-area ul, .md-preview-area ol { margin: 0 0 12px; padding-left: 22px; }
+.md-preview-area li { margin-bottom: 3px; }
+.md-preview-area code { background: var(--bg-raised); color: var(--accent-3); padding: 2px 6px; border-radius: 4px; font-family: "JetBrains Mono", monospace; font-size: 13px; }
+.md-preview-area pre { background: var(--bg-deep); color: var(--fg-primary); padding: 14px 18px; border-radius: 8px; overflow-x: auto; font-family: "JetBrains Mono", monospace; font-size: 12px; line-height: 1.6; }
+.md-preview-area pre code { background: none; color: inherit; padding: 0; font-size: inherit; }
+.md-preview-area blockquote { border-left: 3px solid var(--accent-3); margin: 0 0 12px; padding: 6px 14px; background: var(--bg-surface); color: var(--fg-muted); border-radius: 0 var(--radius-sm) var(--radius-sm) 0; }
+.md-preview-area table { border-collapse: collapse; width: 100%; margin: 0 0 14px; font-size: 13px; }
+.md-preview-area th, .md-preview-area td { border: 1px solid var(--border-default); padding: 7px 10px; text-align: left; }
+.md-preview-area th { background: var(--bg-surface); font-weight: 600; }
+.md-preview-area a { color: var(--accent-3); }
+.md-preview-area strong { color: var(--fg-primary); }
+.md-preview-area hr { border: none; border-top: 1px solid var(--border-default); margin: 20px 0; }
+.md-editor-textarea {
+  flex:1; width: 100%; padding: var(--space-4); font-family: "JetBrains Mono", monospace;
+  font-size: 13px; line-height: 1.7; color: var(--fg-primary);
+  background: var(--bg-surface); border: none; border-radius: 0 0 var(--radius-md) var(--radius-md);
+  resize: none; outline: none; tab-size: 2;
+}
+.md-editor-textarea:focus { box-shadow: inset 0 0 0 1px var(--accent-3); }
+
 /* Reading Status */
 .reading-dot {
   display: inline-block; width: 8px; height: 8px; border-radius: 50%;
@@ -1534,6 +1576,24 @@ footer {
    Family Docs · 家庭资料模块
    ═══════════════════════════════════════════════════════════════ */
 
+/* ── Job Table Full ─────────────────────────────────────── */
+.job-table-full th { white-space: nowrap; }
+.job-table-full td { font-size: 12px; }
+.job-row-skipped { opacity: 0.45; }
+.job-row-skipped:hover { opacity: 0.75; }
+.job-status-select:focus { outline: none; border-color: var(--accent-3); }
+
+/* ── Job Date Block ─────────────────────────────────────── */
+.job-date-block {
+  margin-bottom: var(--space-5);
+}
+.job-date-header {
+  font-size: 14px; font-weight: 800; color: var(--fg-primary);
+  padding: var(--space-2) 0 var(--space-3);
+  border-bottom: 2px solid var(--border-default);
+  margin-bottom: var(--space-3);
+}
+
 /* ── Init Banner ────────────────────────────────────────── */
 .fam-init-banner {
   display: flex; align-items: center; justify-content: center; gap: 12px;
@@ -1596,6 +1656,17 @@ footer {
   margin-left: auto;
   font-size: 12px; color: var(--fg-muted);
   font-family: var(--font-mono); white-space: nowrap;
+}
+
+/* ── Group Grid (大类模块容器) ──────────────────────────── */
+.fam-group-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: var(--space-4);
+  align-items: start;
+}
+@media (max-width: 768px) {
+  .fam-group-grid { grid-template-columns: 1fr; }
 }
 
 /* ── Module Card (大类模块 ──────────────────────────────── */
@@ -1699,6 +1770,20 @@ footer {
   display: flex; align-items: center; gap: var(--space-2);
   padding: var(--space-3) var(--space-4);
   border-bottom: 1px solid var(--border-subtle);
+  user-select: none;
+  transition: background var(--duration-fast);
+}
+.fam-item-card-header:hover { background: rgba(255,255,255,0.02); }
+.fam-item-card .fam-item-expand {
+  font-size: 8px; color: var(--fg-muted);
+  transition: transform 0.2s var(--ease-out);
+  margin-left: var(--space-1);
+}
+.fam-item-card.expanded .fam-item-expand {
+  transform: rotate(90deg);
+}
+.fam-item-card.expanded .fam-item-card-body {
+  display: block !important;
 }
 .fam-item-avatar {
   font-size: 18px; width: 28px; text-align: center; flex-shrink: 0;
@@ -1711,6 +1796,7 @@ footer {
   font-size: 10px; color: var(--fg-muted);
   font-family: var(--font-mono);
 }
+.fam-missing-dot { font-size: 11px; cursor: help; }
 .fam-item-actions {
   margin-left: auto;
   display: flex; gap: var(--space-1);
@@ -2007,6 +2093,59 @@ footer {
   tab-size: 2;
   outline: none;
 }
+
+/* ═══════════════════════════════════════════════════════════════
+   Vault · 密码保险库
+   ═══════════════════════════════════════════════════════════════ */
+.vault-lock-card {
+  text-align: center; padding: var(--space-10) var(--space-5);
+  max-width: 400px; margin: 0 auto;
+}
+.vault-lock-icon { font-size: 56px; margin-bottom: var(--space-4); }
+.vault-lock-card h2 { font-size: 22px; font-weight: 800; margin-bottom: var(--space-2); color: var(--fg-primary); }
+.vault-lock-card p { color: var(--fg-muted); font-size: 13px; margin-bottom: var(--space-5); }
+.vault-lock-form { display: flex; gap: var(--space-2); }
+.vault-lock-form input {
+  flex: 1; padding: 12px 16px; border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm); background: var(--bg-surface);
+  color: var(--fg-primary); font-size: 16px; font-family: var(--font-mono);
+  letter-spacing: 4px;
+}
+.vault-lock-form input:focus { outline: none; border-color: var(--accent-3); }
+.vault-lock-form button { padding: 12px 24px; white-space: nowrap; }
+
+/* ── Vault Module Card ──────────────────────────────────── */
+.vault-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: var(--space-4);
+  align-items: start;
+}
+@media (max-width: 1000px) {
+  .vault-grid { grid-template-columns: repeat(2, 1fr); }
+}
+@media (max-width: 640px) {
+  .vault-grid { grid-template-columns: 1fr; }
+}
+
+/* ── Vault Item Row ─────────────────────────────────────── */
+.vault-item-row {
+  display: flex; align-items: center; gap: var(--space-3);
+  padding: var(--space-2) var(--space-4);
+  border-bottom: 1px solid var(--border-subtle);
+  font-size: 13px; transition: background var(--duration-fast);
+}
+.vault-item-row:last-child { border-bottom: none; }
+.vault-item-row:hover { background: var(--bg-surface); }
+.vault-item-name { font-weight: 600; color: var(--fg-primary); min-width: 80px; }
+.vault-item-account { color: var(--fg-muted); font-size: 11px; font-family: var(--font-mono); flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.vault-item-pwd {
+  font-family: var(--font-mono); font-size: 13px; color: var(--fg-muted);
+  min-width: 60px; text-align: center; user-select: all; cursor: pointer;
+  padding: 2px 8px; border-radius: 4px; transition: all var(--duration-fast);
+}
+.vault-item-pwd.visible { color: var(--fg-primary); background: var(--bg-surface); font-weight: 600; }
+.vault-item-actions { display: flex; gap: 2px; flex-shrink: 0; }
 
 /* ── Mobile ─────────────────────────────────────────────── */
 @media (max-width:768px) {

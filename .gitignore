@@ -5,3 +5,4 @@ __pycache__/
 output/
 *.lock
 data/family_docs.json
+data/vault.json
