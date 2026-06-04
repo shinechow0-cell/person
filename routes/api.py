@@ -14,6 +14,7 @@ from data.stocks import (
     get_available_dates, get_latest_date,
     get_market_summary, get_sector_rankings, get_northbound,
     get_dragon_tiger, get_hot_stocks, get_collection_status,
+    get_realtime_indices,
 )
 from data.wiki import scan_wiki, get_file_content, WIKI_ROOT
 from data import vault
@@ -168,7 +169,8 @@ def api_stock_summary():
         return jsonify({"error": "No data"}), 404
     summary = get_market_summary(target)
     status = get_collection_status(target)
-    return jsonify({"date": target, "summary": summary, "collection": status})
+    realtime = get_realtime_indices()
+    return jsonify({"date": target, "summary": summary, "collection": status, "realtime_indices": realtime})
 
 
 @api.route("/stocks/sectors")

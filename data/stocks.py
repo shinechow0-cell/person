@@ -1,5 +1,6 @@
 """A股数据查询模块 — 从 quant.db 读取每日收盘数据"""
 import sqlite3
+import requests
 from pathlib import Path
 
 DB_PATH = Path.home() / ".tradingagents/data/quant.db"
@@ -14,6 +15,48 @@ def _connect():
     conn = sqlite3.connect(str(DB_PATH))
     conn.row_factory = sqlite3.Row
     return conn
+
+
+# 实时指数代码映射
+_REALTIME_INDEX = {
+    "上证指数": "sh000001",
+    "深证成指": "sz399001",
+    "创业板指": "sz399006",
+    "科创50": "sh000688",
+}
+
+
+def get_realtime_indices() -> list[dict]:
+    """从腾讯接口获取大盘指数实时行情"""
+    codes = list(_REALTIME_INDEX.values())
+    url = f"https://qt.gtimg.cn/q={','.join(codes)}"
+    try:
+        r = requests.get(url, timeout=5)
+        r.encoding = "gbk"
+        result = []
+        for line in r.text.strip().split("\n"):
+            if "~" not in line:
+                continue
+            parts = line.split("~")
+            if len(parts) < 45:
+                continue
+            name = parts[1]
+            price = float(parts[3] or 0)
+            change_pct = float(parts[32] or 0)
+            change_amt = float(parts[31] or 0)
+            volume_yi = round(float(parts[37] or 0) / 1e4, 2)  # 万手→亿手
+            amount_yi = round(float(parts[38] or 0) / 1e8, 2)  # 万元→亿元
+            result.append({
+                "name": name,
+                "price": price,
+                "change_pct": change_pct,
+                "change_amt": change_amt,
+                "volume_yi": volume_yi,
+                "amount_yi": amount_yi,
+            })
+        return result
+    except Exception:
+        return []
 
 
 def get_available_dates() -> list[str]:

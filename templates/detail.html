@@ -330,6 +330,20 @@ async function loadStocksDetail() {
     if (!mr.error && mr.summary) {
       const s = mr.summary;
       html += '<div class="detail-card"><div class="detail-card-header">📈 大盘概览</div><div class="detail-card-body">';
+      // 实时指数
+      if (mr.realtime_indices && mr.realtime_indices.length > 0) {
+        html += '<div class="index-row">';
+        mr.realtime_indices.forEach(idx => {
+          const cls = idx.change_pct >= 0 ? 'up' : 'down';
+          html += `<div class="index-card ${cls}">
+            <div class="index-name">${idx.name}</div>
+            <div class="index-price">${idx.price.toFixed(2)}</div>
+            <div class="index-chg ${cls}">${idx.change_pct >= 0 ? '+' : ''}${idx.change_pct}% (${idx.change_amt >= 0 ? '+' : ''}${idx.change_amt.toFixed(2)})</div>
+            <div class="index-sub">成交 ${idx.amount_yi}亿</div></div>`;
+        });
+        html += '</div>';
+      }
+      // 涨跌家数
       const total = s.up_count + s.down_count + s.flat_count;
       if (total > 0) {
         const upPct = (s.up_count / total * 100).toFixed(1);
@@ -342,17 +356,6 @@ async function loadStocksDetail() {
           <div class="breadth-info">
             成交 ${s.total_amount_yi}亿 · 涨停 ${s.total_limit_up||0} · 跌停 ${s.total_limit_down||0}
           </div></div>`;
-      }
-      if (s.indices && s.indices.length > 0) {
-        html += '<div class="index-row">';
-        s.indices.forEach(idx => {
-          const cls = idx.avg_change_pct >= 0 ? 'up' : 'down';
-          html += `<div class="index-card ${cls}">
-            <div class="index-name">${idx.name}</div>
-            <div class="index-chg ${cls}">${idx.avg_change_pct >= 0 ? '+' : ''}${idx.avg_change_pct}%</div>
-            <div class="index-sub">涨${idx.up} 跌${idx.down} ${idx.amount_yi}亿</div></div>`;
-        });
-        html += '</div>';
       }
       html += '</div></div>';
     }
