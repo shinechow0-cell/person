@@ -45,7 +45,8 @@ def get_realtime_indices() -> list[dict]:
             change_pct = float(parts[32] or 0)
             change_amt = float(parts[31] or 0)
             volume_yi = round(float(parts[37] or 0) / 1e4, 2)  # 万手→亿手
-            amount_yi = round(float(parts[38] or 0) / 1e8, 2)  # 万元→亿元
+            # 指数的成交额字段已经是亿元单位，无需再除
+            amount_yi = round(float(parts[38] or 0), 2)
             result.append({
                 "name": name,
                 "price": price,
