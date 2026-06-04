@@ -104,7 +104,7 @@ function renderConfig() {
         ['行业表', 'daily_industry', 'name/change_pct/leader/net_inflow_yi...'],
         ['北向表', 'daily_northbound', 'hgt_cum（沪股通）/ sgt_cum（深股通）'],
         ['龙虎榜表', 'daily_dragon_tiger', 'code/name/reason/net_buy_wan...'],
-        ['强势股表', 'daily_hot_stocks', 'code/name/reason_tags/change_pct...'],
+        ['强势股表', 'daily_hot_stocks', 'code/name/reason_tags/change_pct(关联daily_valuation)...'],
         ['采集日志', 'collection_log', 'is_trading_day/errors/duration_sec...'],
         ['采集方式', 'Claude CLI + a-stock-data 技能', '通过 Claude 调用 mootdx 等数据源采集'],
         ['执行触发', 'claude -p "使用a-stock-data技能收集..."', '通过 Flask API 触发，锁文件防止 5min 内重复'],
