@@ -383,14 +383,15 @@ async function loadMarket() {
         </div></div>`;
     }
 
-    if (s.indices && s.indices.length > 0) {
+    if (r.realtime_indices && r.realtime_indices.length > 0) {
       html += '<div class="index-row">';
-      s.indices.forEach(idx => {
-        const cls = idx.avg_change_pct >= 0 ? 'up' : 'down';
+      r.realtime_indices.forEach(idx => {
+        const cls = idx.change_pct >= 0 ? 'up' : 'down';
         html += `<div class="index-card ${cls}">
           <div class="index-name">${idx.name}</div>
-          <div class="index-chg ${cls}">${idx.avg_change_pct >= 0 ? '+' : ''}${idx.avg_change_pct}%</div>
-          <div class="index-sub">涨${idx.up} 跌${idx.down} ${idx.amount_yi}亿</div></div>`;
+          <div class="index-price">${idx.price.toFixed(2)}</div>
+          <div class="index-chg ${cls}">${idx.change_pct >= 0 ? '+' : ''}${idx.change_pct}% (${idx.change_amt >= 0 ? '+' : ''}${idx.change_amt.toFixed(2)})</div>
+          <div class="index-sub">成交 ${idx.amount_yi}亿</div></div>`;
       });
       html += '</div>';
     }

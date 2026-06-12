@@ -1,4 +1,5 @@
 """Flask 路由 — 页面 + JSON API"""
+import json
 import os
 import sqlite3
 import subprocess
@@ -14,7 +15,7 @@ from data.stocks import (
     get_available_dates, get_latest_date,
     get_market_summary, get_sector_rankings, get_northbound,
     get_dragon_tiger, get_hot_stocks, get_collection_status,
-    get_realtime_indices,
+    get_realtime_indices, get_historical_indices,
 )
 from data.wiki import scan_wiki, get_file_content, WIKI_ROOT
 from data import vault
@@ -169,7 +170,12 @@ def api_stock_summary():
         return jsonify({"error": "No data"}), 404
     summary = get_market_summary(target)
     status = get_collection_status(target)
-    realtime = get_realtime_indices()
+    from datetime import date as dt
+    today_str = dt.today().isoformat()
+    if target == today_str:
+        realtime = get_realtime_indices()
+    else:
+        realtime = get_historical_indices(target)
     return jsonify({"date": target, "summary": summary, "collection": status, "realtime_indices": realtime})
 
 
@@ -215,6 +221,368 @@ def api_hot_stocks():
         return jsonify({"error": "No data"}), 404
     hot = get_hot_stocks(target)
     return jsonify({"date": target, "count": len(hot), "hot_stocks": hot})
+
+
+# ── API: 因子库 ──────────────────────────────────────────
+
+@api.route("/factors")
+def api_factors():
+    """列出所有因子和过滤"""
+    from data.factors import list_factors
+    return jsonify(list_factors())
+
+
+@api.route("/factors/filters")
+def api_factors_filters():
+    """返回当天过滤快照（剔除明细）"""
+    from data.factors import get_filter_snapshot
+    date = request.args.get("date") or None
+    return jsonify(get_filter_snapshot(date))
+
+
+@api.route("/stocks/industries")
+def api_stock_industries():
+    """返回股票→行业映射 {code: industry}"""
+    import sqlite3
+    from pathlib import Path
+    db_path = Path.home() / ".tradingagents/data/quant.db"
+    conn = sqlite3.connect(str(db_path))
+    rows = conn.execute("SELECT code, industry FROM stock_industry").fetchall()
+    conn.close()
+    return jsonify({r[0]: r[1] for r in rows})
+
+
+@api.route("/backtest/run", methods=["POST"])
+def api_backtest_run():
+    """执行回测"""
+    from data.backtest import run_backtest
+    body = request.get_json(force=True) or {}
+    return jsonify(run_backtest(
+        start_date=body.get("start_date", "2026-05-13"),
+        end_date=body.get("end_date") or None,
+        factor_name=body.get("factor_name", "composite_short"),
+        top_n=int(body.get("top_n", 10)),
+    ))
+
+
+@api.route("/backtest/layer", methods=["POST"])
+def api_backtest_layer():
+    """分层收益分析"""
+    from data.backtest import run_layer_analysis
+    body = request.get_json(force=True) or {}
+    return jsonify(run_layer_analysis(
+        start_date=body.get("start_date", "2026-05-13"),
+        end_date=body.get("end_date") or None,
+        factor_name=body.get("factor_name", "composite_short"),
+    ))
+
+
+@api.route("/backtest/history")
+def api_backtest_history():
+    """回测历史列表"""
+    from data.backtest import list_backtest_history
+    return jsonify(list_backtest_history())
+
+
+@api.route("/backtest/result/<cache_key>")
+def api_backtest_result(cache_key):
+    """读取缓存回测结果"""
+    from data.backtest import get_backtest_result
+    result = get_backtest_result(cache_key)
+    if result is None:
+        return jsonify({"error": True, "message": "缓存不存在"}), 404
+    return jsonify(result)
+
+
+@api.route("/research/layer")
+def api_research_layer():
+    """分层收益报告"""
+    from data.backtest import _run_report_script
+    return jsonify(_run_report_script("layer"))
+
+
+@api.route("/research/quantile")
+def api_research_quantile():
+    """十分位收益报告"""
+    from data.backtest import _run_report_script
+    return jsonify(_run_report_script("quantile"))
+
+
+@api.route("/research/history", methods=["GET", "DELETE"])
+def api_research_history():
+    """因子测试执行记录（GET 查询 / DELETE 删除指定记录）"""
+    import sqlite3
+    from pathlib import Path
+    db_path = Path.home() / ".tradingagents/data/quant.db"
+    conn = sqlite3.connect(str(db_path))
+    if request.method == "DELETE":
+        fid = request.args.get("id")
+        if fid:
+            row = conn.execute("SELECT factor_name FROM research_history WHERE id=?", (fid,)).fetchone()
+            if row:
+                conn.execute("DELETE FROM ic_stats WHERE factor_name=?", (row[0],))
+            conn.execute("DELETE FROM research_history WHERE id=?", (fid,))
+            conn.commit()
+        conn.close()
+        return jsonify({"ok": True})
+    # 支持 ?id=X 取详情（含 saved_result）
+    fid = request.args.get("id")
+    if fid:
+        row = conn.execute("SELECT id, run_at, factor_name, saved_result FROM research_history WHERE id=?", (fid,)).fetchone()
+        conn.close()
+        if row and row[3]:
+            detail = json.loads(row[3])
+            detail["id"] = row[0]; detail["run_at"] = row[1]; detail["factor_name"] = row[2]
+            return jsonify(detail)
+        conn.close() if not conn else None
+        return jsonify({"error": True, "message": "无缓存"})
+    rows = conn.execute("SELECT id, run_at, factor_name, start_date, end_date, total_days, factor_desc, ic_ret5, layer_top10_5d, layer_top50_5d, monotonic_5d, saved_result FROM research_history ORDER BY id DESC LIMIT 30").fetchall()
+    conn.close()
+    return jsonify([{"id": r[0], "run_at": r[1], "factor_name": r[2], "start_date": r[3], "end_date": r[4], "total_days": r[5], "factor_desc": r[6], "ic_ret5": r[7], "top10_5d": r[8], "top50_5d": r[9], "monotonic_5d": r[10], "has_detail": bool(r[11])} for r in rows])
+
+
+@api.route("/research/history", methods=["POST"])
+def api_research_save():
+    """保存测试结果"""
+    import sqlite3
+    from pathlib import Path
+    from datetime import datetime
+    body = request.get_json(force=True) or {}
+    db_path = Path.home() / ".tradingagents/data/quant.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        "INSERT INTO research_history (run_at, factor_name, start_date, end_date, total_days, factor_desc, ic_ret3, ic_ret5, ic_ret10, ic_ret20, layer_top10_5d, layer_top20_5d, layer_top50_5d, monotonic_5d, saved_result) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (datetime.now().isoformat(), body.get("factor_name"),
+         body.get("start_date"), body.get("end_date"), body.get("total_days"), body.get("factor_desc"),
+         body.get("ic_ret3"), body.get("ic_ret5"), body.get("ic_ret10"), body.get("ic_ret20"),
+         body.get("layer_top10_5d"), body.get("layer_top20_5d"), body.get("layer_top50_5d"),
+         1 if body.get("monotonic_5d") else 0,
+         json.dumps(body.get("detail"))),
+    )
+    conn.commit()
+    conn.close()
+    return jsonify({"ok": True})
+
+
+@api.route("/research/run", methods=["POST"])
+def api_research_run():
+    """统一因子测试：IC + 分层 + 十分位"""
+    import subprocess, json as j
+    body = request.get_json(force=True) or {}
+    factor = body.get("factor_name", "composite_short")
+    sd = body.get("start_date", "2025-01-02")
+    ed = body.get("end_date", "2026-06-12")
+    script = f"""
+import sys, json, numpy as np
+sys.path.insert(0, '/Users/shinechow/Documents/code/a-stock-data')
+from quant.factor_lib import QuantDB
+db = QuantDB(); conn = db._connect()
+
+horizons = ['ret_3d','ret_5d','ret_10d','ret_20d']
+layers = [10,20,50]
+
+# 一次性取所有日期的数据
+dates = [r[0] for r in conn.execute(\"SELECT DISTINCT f.trade_date FROM factor_value f JOIN label_future_return l ON f.trade_date=l.trade_date AND f.code=l.code WHERE f.{factor} IS NOT NULL AND l.ret_5d IS NOT NULL AND f.trade_date BETWEEN '{sd}' AND '{ed}' ORDER BY f.trade_date\")]
+
+# 预加载所有数据：{{date: {{horizon: [values sorted by factor DESC]}}}}
+data_by_date = {{}}
+for d in dates:
+    rows = conn.execute(f\"SELECT f.{factor}, l.ret_3d, l.ret_5d, l.ret_10d, l.ret_20d FROM factor_value f JOIN label_future_return l ON f.trade_date=l.trade_date AND f.code=l.code WHERE f.trade_date=? AND f.{factor} IS NOT NULL\", (d,)).fetchall()
+    if len(rows)<100: continue
+    arr = [(float(r[0] or 0), float(r[1] or 0), float(r[2] or 0), float(r[3] or 0), float(r[4] or 0)) for r in rows]
+    arr.sort(key=lambda x: x[0], reverse=True)  # sorted by factor DESC
+    data_by_date[d] = arr
+
+conn.close()
+
+# IC: 用原始(未排序)数据算相关系数
+ic_result = {{}}
+for hi, h in enumerate(horizons):
+    vals = []
+    for d in dates:
+        rows = data_by_date.get(d, [])
+        if len(rows)<100: continue
+        fv = np.array([r[0] for r in rows])
+        lb = np.array([r[hi+1] for r in rows])
+        ic=np.corrcoef(fv,lb)[0,1]
+        if not np.isnan(ic): vals.append(float(ic))
+    ic_result[h] = {{'ic': round(np.mean(vals),4) if vals else 0, 'days': len(vals)}}
+
+# Layer + Quantile: 用已排序数据
+layer_result = {{}}
+q_result = []
+for hi, h in enumerate(horizons):
+    lr = {{n: [] for n in layers}}
+    qr = {{i: [] for i in range(10)}}
+    for d in dates:
+        rows = data_by_date.get(d, [])
+        if len(rows)<100: continue
+        labels = [r[hi+1] for r in rows]
+        for n in layers:
+            top = labels[:n]
+            if top: lr[n].append(float(np.mean(top)))
+        # Quantile
+        sz=len(labels)//10
+        for qi in range(10):
+            b=labels[qi*sz:(qi+1)*sz if qi<9 else len(labels)]
+            if b: qr[qi].append(float(np.mean(b)))
+    layer_result[h] = {{f'top{{n}}': {{'avg': round(float(np.mean(lr[n]))*100,2) if lr[n] else 0, 'days': len(lr[n])}} for n in layers}}
+    for qi in range(10):
+        arr=np.array(qr[qi]) if qr[qi] else np.array([])
+        if len(arr)>0:
+            q_result.append({{'horizon':h,'quantile':f'Q{{qi+1}}','avg_return':round(float(arr.mean())*100,2),'days':len(arr)}})
+
+print('__JSON_START__')
+print(json.dumps({{'factor': '{factor}', 'ic': ic_result, 'layers': layer_result, 'quantile': q_result}}, ensure_ascii=False))
+"""
+    proc = subprocess.run(["/opt/miniconda3/bin/python3", "-c", script], capture_output=True, text=True, timeout=120, cwd="/Users/shinechow/Documents/code/a-stock-data")
+    if proc.returncode != 0:
+        return jsonify({"error": True, "message": (proc.stderr or proc.stdout).strip()[:500]})
+    out = proc.stdout.strip(); idx = out.find("__JSON_START__")
+    if idx >= 0:
+        return jsonify(json.loads(out[idx+14:].strip()))
+    return jsonify({"error": True, "message": out[:200]})
+
+
+@api.route("/research/ic-test", methods=["POST"])
+def api_ic_test():
+    """单因子 IC 测试"""
+    import subprocess, json
+    body = request.get_json(force=True) or {}
+    factor = body.get("factor_name", "composite_short")
+    start = body.get("start_date", "2026-05-13")
+    end = body.get("end_date") or "2026-06-12"
+    script = f"""
+import sys, json, numpy as np
+sys.path.insert(0, '/Users/shinechow/Documents/code/a-stock-data')
+from quant.factor_lib import QuantDB
+db = QuantDB(); conn = db._connect()
+dates = [r[0] for r in conn.execute(\"SELECT DISTINCT f.trade_date FROM factor_value f JOIN label_future_return l ON f.trade_date=l.trade_date AND f.code=l.code WHERE f.{factor} IS NOT NULL ORDER BY f.trade_date\")]
+horizons = ['ret_3d','ret_5d','ret_10d','ret_20d']
+result = {{h: [] for h in horizons}}
+for d in dates:
+    rows = conn.execute(f\"SELECT f.{factor}, l.ret_3d, l.ret_5d, l.ret_10d, l.ret_20d FROM factor_value f JOIN label_future_return l ON f.trade_date=l.trade_date AND f.code=l.code WHERE f.trade_date=? AND f.{factor} IS NOT NULL\", (d,)).fetchall()
+    if len(rows)<100: continue
+    for hi, h in enumerate(horizons):
+        fv=np.array([float(r[0] or 0) for r in rows]); lb=np.array([float(r[hi+1] or 0) for r in rows])
+        ic=np.corrcoef(fv,lb)[0,1]
+        if not np.isnan(ic): result[h].append(float(ic))
+conn.close()
+summary = {{h: {{'ic': round(np.mean(v),4) if v else 0, 'days': len(v)}} for h,v in result.items()}}
+print('__JSON_START__'); print(json.dumps({{'factor': '{factor}', 'ic': summary}}, ensure_ascii=False))
+"""
+    proc = subprocess.run(["/opt/miniconda3/bin/python3", "-c", script], capture_output=True, text=True, timeout=30, cwd="/Users/shinechow/Documents/code/a-stock-data")
+    out = proc.stdout.strip(); idx = out.find("__JSON_START__")
+    return jsonify(json.loads(out[idx+14:].strip()) if idx>=0 else {"error":True})
+
+
+@api.route("/research/layer-test", methods=["POST"])
+def api_layer_test():
+    """单因子分层测试"""
+    import subprocess, json
+    body = request.get_json(force=True) or {}
+    factor = body.get("factor_name", "composite_short")
+    script = f"""
+import sys, json, numpy as np
+sys.path.insert(0, '/Users/shinechow/Documents/code/a-stock-data')
+from quant.factor_lib import QuantDB
+db = QuantDB(); conn = db._connect()
+horizons = ['ret_3d','ret_5d','ret_10d','ret_20d']
+layers = [10,20,50]
+result = {{}}
+for h in horizons:
+    dates = [r[0] for r in conn.execute(f\"SELECT DISTINCT s.trade_date FROM score_daily s JOIN label_future_return l ON s.trade_date=l.trade_date AND s.code=l.code WHERE l.{{h}} IS NOT NULL ORDER BY s.trade_date\").fetchall()]
+    lr = {{n: [] for n in layers}}
+    for d in dates:
+        rows = conn.execute(f\"SELECT s.rank_market, l.{{h}} FROM score_daily s JOIN label_future_return l ON s.trade_date=l.trade_date AND s.code=l.code WHERE s.trade_date=? ORDER BY s.rank_market\", (d,)).fetchall()
+        # Use factor value ranking instead
+        rows2 = conn.execute(f\"SELECT l.{{h}} FROM factor_value f JOIN label_future_return l ON f.trade_date=l.trade_date AND f.code=l.code WHERE f.trade_date=? AND f.{factor} IS NOT NULL AND l.{{h}} IS NOT NULL ORDER BY f.{factor} DESC\", (d,)).fetchall()
+        if len(rows2)<50: continue
+        for n in layers:
+            top = [r[0] for r in rows2[:n] if r[0] is not None]
+            if top: lr[n].append(float(np.mean(top)))
+    result[h] = {{f'top{{n}}': {{'avg': round(float(np.mean(lr[n]))*100,2) if lr[n] else 0, 'days': len(lr[n])}} for n in layers}}
+conn.close()
+print('__JSON_START__'); print(json.dumps({{'factor': '{factor}', 'layers': result}}, ensure_ascii=False))
+"""
+    proc = subprocess.run(["/opt/miniconda3/bin/python3", "-c", script], capture_output=True, text=True, timeout=30, cwd="/Users/shinechow/Documents/code/a-stock-data")
+    out = proc.stdout.strip(); idx = out.find("__JSON_START__")
+    return jsonify(json.loads(out[idx+14:].strip()) if idx>=0 else {"error":True})
+
+
+@api.route("/research/stats")
+def api_research_stats():
+    """全量统计（读 DB 表）"""
+    import subprocess, json
+    script = r"""
+import sys, json
+sys.path.insert(0, '/Users/shinechow/Documents/code/a-stock-data')
+from quant.reports.full_stats import ensure_stat_tables, query_stats
+ensure_stat_tables()
+result = query_stats()
+if not result['ic']:
+    # 首次运行，计算一次
+    from quant.reports.full_stats import compute_all_stats
+    compute_all_stats()
+    result = query_stats()
+print("__JSON_START__")
+print(json.dumps(result, ensure_ascii=False))
+"""
+    proc = subprocess.run(
+        ["/opt/miniconda3/bin/python3", "-c", script],
+        capture_output=True, text=True, timeout=120,
+        cwd="/Users/shinechow/Documents/code/a-stock-data",
+    )
+    if proc.returncode != 0:
+        return jsonify({"error": True, "message": proc.stderr.strip()[:200]})
+    out = proc.stdout.strip()
+    idx = out.find("__JSON_START__")
+    if idx >= 0:
+        return jsonify(json.loads(out[idx + len("__JSON_START__"):].strip()))
+    try:
+        return jsonify(json.loads(out))
+    except json.JSONDecodeError:
+        return jsonify({"error": True, "message": out[:200]})
+
+
+@api.route("/stocks/health")
+def api_stocks_health():
+    """数据健康检查（按天缓存，支持 ?date= 检查指定日期）"""
+    from data.factors import get_data_health
+    date = request.args.get("date") or None
+    return jsonify(get_data_health(date))
+
+
+@api.route("/factors/history")
+def api_factors_history():
+    """返回缓存历史列表（不含 rows）"""
+    from data.factors import get_history
+    return jsonify(get_history())
+
+
+@api.route("/factors/result/<cache_key>", methods=["GET", "DELETE"])
+def api_factors_result(cache_key):
+    """读取或删除指定缓存结果"""
+    from data.factors import get_cached_result, delete_cached_result
+    if request.method == "DELETE":
+        ok = delete_cached_result(cache_key)
+        return jsonify({"ok": ok})
+    result = get_cached_result(cache_key)
+    if result is None:
+        return jsonify({"error": True, "message": "缓存不存在"}), 404
+    return jsonify(result)
+
+
+@api.route("/factors/run", methods=["POST"])
+def api_factors_run():
+    """执行因子排名（优先读缓存）"""
+    from data.factors import execute_factor
+    body = request.get_json(force=True) or {}
+    factor_name = body.get("factor_name", "ret_5d")
+    date = body.get("date") or None
+    top_n = int(body.get("top_n", 100))
+    filters = body.get("filters", None)
+    return jsonify(execute_factor(factor_name, date=date, top_n=top_n, filters=filters))
 
 
 # ── API: Wiki / 读书笔记 ──────────────────────────────────

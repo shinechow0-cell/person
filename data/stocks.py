@@ -44,9 +44,12 @@ def get_realtime_indices() -> list[dict]:
             price = float(parts[3] or 0)
             change_pct = float(parts[32] or 0)
             change_amt = float(parts[31] or 0)
-            volume_yi = round(float(parts[37] or 0) / 1e4, 2)  # 万手→亿手
-            # 指数的成交额字段已经是亿元单位，无需再除
-            amount_yi = round(float(parts[38] or 0), 2)
+            # parts[35] 复合字段: 价格/成交量(手)/成交额(元)
+            composite = parts[35].split("/") if parts[35] else []
+            volume_shou = float(composite[1]) if len(composite) >= 2 else 0
+            volume_yi = round(volume_shou / 1e8, 2)  # 手→亿手
+            # parts[37] 实际是成交额(万元)，parts[38] 是振幅等指标
+            amount_yi = round(float(parts[37] or 0) / 1e4, 2)  # 万元→亿元
             result.append({
                 "name": name,
                 "price": price,
@@ -54,6 +57,42 @@ def get_realtime_indices() -> list[dict]:
                 "change_amt": change_amt,
                 "volume_yi": volume_yi,
                 "amount_yi": amount_yi,
+            })
+        return result
+    except Exception:
+        return []
+
+
+def get_historical_indices(date: str) -> list[dict]:
+    """从 daily_indices 表获取指定日期的指数数据"""
+    try:
+        conn = _connect()
+        rows = conn.execute(
+            "SELECT code, name, close, change_pct, amount FROM daily_indices WHERE date=?",
+            (date,),
+        ).fetchall()
+        conn.close()
+        if not rows:
+            return []
+        result = []
+        for r in rows:
+            price = r[2] or 0
+            chg_pct = r[3] or 0
+            amount = r[4] or 0
+            # change_amt 反算: price × chg_pct / (1 + chg_pct/100) × chg_pct/100 * price 错误
+            # 直接用: prev_close = price / (1 + chg_pct/100), change_amt = price - prev_close
+            if chg_pct != 0 and (1 + chg_pct / 100) != 0:
+                prev_close = price / (1 + chg_pct / 100)
+                change_amt = round(price - prev_close, 2)
+            else:
+                change_amt = 0
+            result.append({
+                "name": r[1],
+                "price": price,
+                "change_pct": chg_pct,
+                "change_amt": change_amt,
+                "volume_yi": 0,
+                "amount_yi": round(amount, 2) if amount else 0,
             })
         return result
     except Exception:
@@ -181,12 +220,16 @@ def get_northbound(date: str) -> dict | None:
 
 
 def get_dragon_tiger(date: str) -> list[dict]:
-    """龙虎榜"""
+    """龙虎榜（含估值数据）"""
     conn = _connect()
     rows = conn.execute(
-        "SELECT code, name, reason, close, change_pct, net_buy_wan, buy_wan, sell_wan "
-        "FROM daily_dragon_tiger WHERE date=? "
-        "ORDER BY ABS(net_buy_wan) DESC",
+        "SELECT dt.code, dt.name, dt.reason, dt.close, dt.change_pct, dt.net_buy_wan, dt.buy_wan, dt.sell_wan, "
+        "v.mcap, v.turnover_pct, b.amount "
+        "FROM daily_dragon_tiger dt "
+        "LEFT JOIN daily_valuation v ON dt.code=v.code AND v.date=dt.date "
+        "LEFT JOIN daily_bars b ON dt.code=b.code AND b.date=dt.date "
+        "WHERE dt.date=? "
+        "ORDER BY ABS(dt.net_buy_wan) DESC",
         (date,),
     ).fetchall()
     conn.close()
@@ -199,18 +242,25 @@ def get_dragon_tiger(date: str) -> list[dict]:
             "net_buy_wan": round(r["net_buy_wan"], 0) if r["net_buy_wan"] else 0,
             "buy_wan": round(r["buy_wan"], 0) if r["buy_wan"] else 0,
             "sell_wan": round(r["sell_wan"], 0) if r["sell_wan"] else 0,
+            "mcap": round(r["mcap"], 2) if r["mcap"] else None,
+            "turnover_pct": round(r["turnover_pct"], 2) if r["turnover_pct"] else None,
+            "amount": round(r["amount"], 0) if r["amount"] else None,
         }
         for r in rows
     ]
 
 
 def get_hot_stocks(date: str) -> list[dict]:
-    """强势股 + 热点题材"""
+    """强势股 + 热点题材（含估值）"""
     conn = _connect()
     rows = conn.execute(
-        "SELECT code, name, reason_tags, change_pct, turnover_pct, dde_net "
-        "FROM daily_hot_stocks WHERE date=? "
-        "ORDER BY change_pct DESC",
+        "SELECT hs.code, hs.name, hs.reason_tags, hs.change_pct, hs.turnover_pct, hs.dde_net, "
+        "v.mcap, b.amount "
+        "FROM daily_hot_stocks hs "
+        "LEFT JOIN daily_valuation v ON hs.code=v.code AND v.date=hs.date "
+        "LEFT JOIN daily_bars b ON hs.code=b.code AND b.date=hs.date "
+        "WHERE hs.date=? "
+        "ORDER BY hs.change_pct DESC",
         (date,),
     ).fetchall()
     conn.close()
@@ -221,6 +271,8 @@ def get_hot_stocks(date: str) -> list[dict]:
             "change_pct": round(r["change_pct"], 2) if r["change_pct"] else 0,
             "turnover_pct": round(r["turnover_pct"], 2) if r["turnover_pct"] else 0,
             "dde_net": round(r["dde_net"], 2) if r["dde_net"] else 0,
+            "mcap": round(r["mcap"], 2) if r["mcap"] else None,
+            "amount": round(r["amount"], 0) if r["amount"] else None,
         }
         for r in rows
     ]

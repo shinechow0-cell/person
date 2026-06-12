@@ -63,13 +63,68 @@ function toggleTheme() {
 // ═══════════════════════════════════════════════════════════════
 const MODULE = '{{ module }}';
 const today = new Date().toISOString().slice(0, 10);
+let _stocksDate = today;  // A股页面可切换日期
+let _industryMap = {};    // 股票→行业映射
+
+// 因子元数据（全局，供 loadFactorsTab 和 showFactorDetail 共用）
+const FACTOR_META = {
+  ret_5d:            {cat:'涨跌幅', formula:'(今日收盘 − 5日前收盘) / 5日前收盘',
+                      desc:'最近5个交易日的累计涨跌幅。正值表示上涨，用于捕捉短期强势股。'},
+  ret_10d:           {cat:'涨跌幅', formula:'(今日收盘 − 10日前收盘) / 10日前收盘',
+                      desc:'最近10个交易日的累计涨跌幅。相比5日更平滑，适合捕捉中期趋势。'},
+  ret_20d:           {cat:'涨跌幅', formula:'(今日收盘 − 20日前收盘) / 20日前收盘',
+                      desc:'最近20个交易日的累计涨跌幅。过滤短期噪音，反映月度级别趋势。'},
+  vol_ratio_5d:      {cat:'量能',   formula:'近5日均量 / 近20日均量',
+                      desc:'短期成交量相比中期的变化。>1表示近期放量，可能是资金异动信号。'},
+  vol_ratio_20d:     {cat:'量能',   formula:'近20日均量 / 近60日均量',
+                      desc:'中期成交量的变化趋势。持续>1表示中长期活跃度上升。'},
+  vol_stability_5d:  {cat:'量能',   formula:'1 − (5日量标准差 / 5日均量)',
+                      desc:'衡量近期成交量是否稳定。越接近1越稳定，缩量横盘的股票得分高。'},
+  turnover_5d:       {cat:'量能',   formula:'近5日换手率均值',
+                      desc:'近5天平均换手率，反映短期交易活跃度。换手率越高，市场关注度越高。'},
+  trend_alignment:   {cat:'形态',   formula:'MA5 > MA10 > MA20 → 正分(最小间距比)；否则 −1',
+                      desc:'多头排列：短期均线在上、中期居中、长期在下。出现则说明上升趋势确立。'},
+  bb_width:          {cat:'形态',   formula:'宽度 = 4σ / MA20，得分 = sigmoid(Z-score)，收敛=高分',
+                      desc:'布林带宽度收窄意味着波动率降低、即将选择方向。宽度创近期新低→极度收敛→可能突破。'},
+  ma20_pullback:     {cat:'形态',   formula:'距MA20∈[-1%,+2%]+回落靠近+MA20上升；贴得越近越高',
+                      desc:'二踩图核心：股价从上方回落到20日均线附近但不跌破，均线向上。满足条件的股票可能形成二踩买点。'},
+  price_position_20d:{cat:'位置',   formula:'位置=(收盘−20低)/(20高−20低)，中间高分(0.4~0.7)，两头低分',
+                      desc:'20日价格位置：中间地带说明短线已企稳回升、上方还有空间，适合短期波段。'},
+  price_position_40d:{cat:'位置',   formula:'位置=(收盘−40低)/(40高−40低)，中间高分(0.4~0.7)，两头低分',
+                      desc:'40日价格位置：中期价格区间，中间地带说明中期趋势健康。'},
+  price_position_60d:{cat:'位置',   formula:'位置=(收盘−60低)/(60高−60低)，中间高分(0.4~0.7)，两头低分',
+                      desc:'60日价格位置：长期价格区间。中间地带是U形底/二踩图的最佳区间——已从底部反弹但未到前高。'},
+  vol_price_div:     {cat:'综合',   formula:'(5日量/20日量 − 1) × 位置惩罚。位置0.2~0.5满分，高位0.1',
+                      desc:'量价背离：价格在低位但成交量放大="底部吸筹"。价在低位+量放大=高分。价在高位放量=低分。'},
+  rel_strength:     {cat:'综合',   formula:'个股10日涨幅 − 上证指数10日涨幅',
+                      desc:'相对强度：对比同期上证指数，跑赢越多分越高。正分=抗跌或领涨，负分=弱于大盘。'},
+  amp_contract:     {cat:'形态',   formula:'近5日均振幅 / 近20日均振幅，线性映射到0~1',
+                      desc:'振幅收缩率：短线波动收窄。比值越小=越收敛=即将突破。对布林带收敛的短线补充。'},
+  volatility_20d:   {cat:'量能',   formula:'std(日收益率, 20)，线性映射 0→1, 5%→0',
+                      desc:'20日波动率：日收益率标准差。越低=趋势越平滑、走势越稳。区分"一路涨"和"上蹿下跳"。'},
+  ma20_slope:       {cat:'形态',   formula:'(今日MA20 − 10日前MA20) / 10日前MA20，sigmoid映射',
+                      desc:'MA20斜率：均线上升的速度。10日斜率越大=趋势越强。比"多头排列"更精细地量化趋势强度。'},
+  breakout_60d:     {cat:'形态',   formula:'收盘价 / 60日最高价，线性映射 0.7→0, 1.0→1.0',
+                      desc:'突破因子：距60日前高的距离。越接近或突破前高=越高分。A股趋势策略核心——平台突破。'},
+  amount_ratio:     {cat:'量能',   formula:'近5日均成交额 / 近20日均成交额，sigmoid映射',
+                      desc:'资金关注度：成交额(金额)的短期vs中期比值。比量比更准确——低价股放量不一定是真资金。'},
+  small_cap:        {cat:'综合',   formula:'1 − (ln市值 − ln最小) / (ln最大 − ln最小)',
+                      desc:'市值因子：越小得分越高。A股存在小市值溢价，技术面相同时小盘股收益更高。'},
+  sector_strength:  {cat:'综合',   formula:'所属板块指数10日涨幅，sigmoid映射。创业板→创业板指，科创板→科创50，主板→上证',
+                      desc:'板块强度：所属行业10日均涨幅。行业强则板块内个股更易持续。已映射1032只→92个行业。'},
+};
 
 async function init() {
-  document.getElementById('detail-meta').textContent = '日期: ' + today;
+  if (MODULE === 'stocks') {
+    await initStocksDateNav();
+    loadIndustryMap();
+  } else {
+    document.getElementById('detail-meta').textContent = '日期: ' + today;
+  }
   renderConfig();
   switch (MODULE) {
-    case 'jobs': await loadJobsDetail(); break;
     case 'stocks': await loadStocksDetail(); break;
+    case 'jobs': await loadJobsDetail(); break;
     case 'wiki': await loadWikiDetail(); break;
     case 'family': await loadFamilyDetail(); break;
     case 'vault': await loadVaultDetail(); break;
@@ -314,41 +369,60 @@ async function setJobStatus(jobId, status) {
 // ═══════════════════════════════════════════════════════════════
 // A股详情
 // ═══════════════════════════════════════════════════════════════
+let _stocksTab = 'data';  // 'data' | 'factors'
+let _factorsMeta = null;  // 因子/过滤元数据缓存
+
 async function loadStocksDetail() {
   try {
     const [mr, sr, nr, dr, hr] = await Promise.all([
-      fetch(`/api/stocks/summary?date=${today}`).then(r => r.json()),
-      fetch(`/api/stocks/sectors?date=${today}`).then(r => r.json()),
-      fetch(`/api/stocks/northbound?date=${today}`).then(r => r.json()),
-      fetch(`/api/stocks/dragon-tiger?date=${today}`).then(r => r.json()),
-      fetch(`/api/stocks/hot?date=${today}`).then(r => r.json()),
+      fetch(`/api/stocks/summary?date=${_stocksDate}`).then(r => r.json()),
+      fetch(`/api/stocks/sectors?date=${_stocksDate}`).then(r => r.json()),
+      fetch(`/api/stocks/northbound?date=${_stocksDate}`).then(r => r.json()),
+      fetch(`/api/stocks/dragon-tiger?date=${_stocksDate}`).then(r => r.json()),
+      fetch(`/api/stocks/hot?date=${_stocksDate}`).then(r => r.json()),
     ]);
 
-    let html = '';
+    // ── 数据健康检查（异步，不阻塞）──
+    checkDataHealth();
 
-    // ── 大盘概览 ──
+    // ── 侧边栏 ──
+    const sidebar = `<div class="stocks-sidebar">
+      <button class="stocks-tab ${_stocksTab === 'data' ? 'active' : ''}" onclick="switchStocksTab('data')">📊<br>每日<br>数据</button>
+      <button class="stocks-tab ${_stocksTab === 'factors' ? 'active' : ''}" onclick="switchStocksTab('factors')">🧬<br>因子<br>库</button>
+      <button class="stocks-tab ${_stocksTab === 'composite' ? 'active' : ''}" onclick="switchStocksTab('composite')">🧩<br>组合<br>因子</button>
+      <button class="stocks-tab ${_stocksTab === 'backtest' ? 'active' : ''}" onclick="switchStocksTab('backtest')">🔬<br>因子<br>测试</button>
+      <button class="stocks-tab ${_stocksTab === 'bt-system' ? 'active' : ''}" onclick="switchStocksTab('bt-system')">📈<br>回测<br>系统</button>
+    </div>`;
+
+    // ── 每日数据 Tab ──
+    let dataHtml = `<div class="quick-nav-bar" id="quick-nav">
+      <span class="quick-nav-label">跳转：</span>
+      <a class="quick-nav-link" href="#sec-overview">📈 大盘概览</a>
+      <a class="quick-nav-link" href="#sec-sectors">🏭 行业板块</a>
+      <a class="quick-nav-link" href="#sec-northbound">💰 北向资金</a>
+      <a class="quick-nav-link" href="#sec-dragontiger">🐉 龙虎榜</a>
+      <a class="quick-nav-link" href="#sec-hotstocks">⚡ 强势股</a>
+    </div>`;
     if (!mr.error && mr.summary) {
       const s = mr.summary;
-      html += '<div class="detail-card"><div class="detail-card-header">📈 大盘概览</div><div class="detail-card-body">';
-      // 实时指数
+      dataHtml += '<div class="detail-card" id="sec-overview"><div class="detail-card-header">📈 大盘概览</div><div class="detail-card-body">';
       if (mr.realtime_indices && mr.realtime_indices.length > 0) {
-        html += '<div class="index-row">';
+        dataHtml += '<div class="index-row">';
         mr.realtime_indices.forEach(idx => {
           const cls = idx.change_pct >= 0 ? 'up' : 'down';
-          html += `<div class="index-card ${cls}">
+          dataHtml += `<div class="index-card ${cls}">
             <div class="index-name">${idx.name}</div>
             <div class="index-price">${idx.price.toFixed(2)}</div>
             <div class="index-chg ${cls}">${idx.change_pct >= 0 ? '+' : ''}${idx.change_pct}% (${idx.change_amt >= 0 ? '+' : ''}${idx.change_amt.toFixed(2)})</div>
             <div class="index-sub">成交 ${idx.amount_yi}亿</div></div>`;
         });
-        html += '</div>';
+        dataHtml += '</div>';
       }
-      // 涨跌家数
       const total = s.up_count + s.down_count + s.flat_count;
       if (total > 0) {
         const upPct = (s.up_count / total * 100).toFixed(1);
         const downPct = (s.down_count / total * 100).toFixed(1);
-        html += `<div class="market-breadth">
+        dataHtml += `<div class="market-breadth">
           <div class="breadth-bar">
             <div class="breadth-up" style="width:${upPct}%">${s.up_count} ↑</div>
             <div class="breadth-down" style="width:${downPct}%">${s.down_count} ↓</div>
@@ -357,66 +431,1342 @@ async function loadStocksDetail() {
             成交 ${s.total_amount_yi}亿 · 涨停 ${s.total_limit_up||0} · 跌停 ${s.total_limit_down||0}
           </div></div>`;
       }
-      html += '</div></div>';
+      dataHtml += '</div></div>';
     }
 
-    // ── 行业板块 ──
     if (!sr.error && sr.sectors && sr.sectors.length > 0) {
-      html += `<div class="detail-card"><div class="detail-card-header">🏭 行业板块 · 全部 ${sr.sectors.length} 个</div><div class="detail-card-body" style="padding:0;overflow-x:auto;">
+      dataHtml += `<div class="detail-card" id="sec-sectors"><div class="detail-card-header">🏭 行业板块 · 全部 ${sr.sectors.length} 个</div><div class="detail-card-body" style="padding:0;overflow-x:auto;">
         <table class="job-table"><thead><tr><th>#</th><th>行业</th><th>涨跌幅</th><th>成交额</th><th>净流入</th><th>涨/跌</th><th>龙头</th></tr></thead><tbody>`;
       sr.sectors.forEach((s, i) => {
         const cls = s.change_pct >= 0 ? 'up' : 'down';
-        html += `<tr>
+        dataHtml += `<tr>
           <td>${i+1}</td><td style="font-weight:600;">${s.name}</td>
           <td class="${cls}">${s.change_pct >= 0 ? '+' : ''}${s.change_pct}%</td>
           <td>${s.turnover_yi}亿</td><td>${s.net_inflow_yi}亿</td>
           <td>涨${s.up||0}/跌${s.down||0}</td><td>${s.leader||'-'}</td></tr>`;
       });
-      html += '</tbody></table></div></div>';
+      dataHtml += '</tbody></table></div></div>';
     }
 
-    // ── 北向资金 ──
     if (!nr.error && nr.northbound) {
       const nb = nr.northbound;
       const cls = nb.total_yi >= 0 ? 'up' : 'down';
-      html += `<div class="detail-card"><div class="detail-card-header">💰 北向资金</div><div class="detail-card-body">
+      dataHtml += `<div class="detail-card" id="sec-northbound"><div class="detail-card-header">💰 北向资金</div><div class="detail-card-body">
         <div class="nb-card">
           <div class="nb-total ${cls}">${nb.total_yi >= 0 ? '+' : ''}${nb.total_yi} 亿</div>
           <div class="nb-detail">沪股通 ${nb.hgt_yi}亿 · 深股通 ${nb.sgt_yi}亿</div></div></div></div>`;
     }
 
-    // ── 龙虎榜 ──
     if (!dr.error && dr.dragon_tiger && dr.dragon_tiger.length > 0) {
-      html += `<div class="detail-card"><div class="detail-card-header">🐉 龙虎榜 · ${dr.dragon_tiger.length} 条</div><div class="detail-card-body">`;
+      dataHtml += `<div class="detail-card" id="sec-dragontiger"><div class="detail-card-header">🐉 龙虎榜 · ${dr.dragon_tiger.length} 条</div>
+        <div class="detail-card-body" style="padding:0;overflow-x:auto;">
+        <table class="job-table"><thead><tr><th>代码</th><th>名称</th><th>板块</th><th>行业</th><th>涨跌幅</th><th>收盘价</th><th>市值(亿)</th><th>换手率</th><th>成交额(万)</th><th>净买入(亿)</th><th>买入(万)</th><th>卖出(万)</th><th>上榜原因</th></tr></thead><tbody>`;
       dr.dragon_tiger.forEach(dt => {
         const cls = dt.change_pct >= 0 ? 'up' : 'down';
-        html += `<div class="dt-item">
-          <span class="dt-name">${dt.name}</span><span class="dt-code">${dt.code}</span>
-          <span class="dt-pct ${cls}">${dt.change_pct >= 0 ? '+' : ''}${dt.change_pct}%</span>
-          <span class="text-mono text-muted">净${dt.net_buy_wan >= 0 ? '+' : ''}${(dt.net_buy_wan/10000).toFixed(2)}亿</span>
-          <div class="dt-reason">${dt.reason}</div></div>`;
+        dataHtml += `<tr>
+          <td class="code-cell">${codeLink(dt.code)}</td><td style="font-weight:600;">${dt.name}</td>
+          <td style="font-size:11px;">${getStockSector(dt.code)}</td>
+          <td style="font-size:11px;">${getStockIndustry(dt.code)}</td>
+          <td class="${cls}">${dt.change_pct >= 0 ? '+' : ''}${dt.change_pct}%</td>
+          <td>${dt.close}</td>
+          <td>${dt.mcap != null ? dt.mcap.toFixed(1)+'亿' : '-'}</td>
+          <td>${dt.turnover_pct != null ? dt.turnover_pct+'%' : '-'}</td>
+          <td>${dt.amount != null ? (dt.amount/1e4).toFixed(0)+'万' : '-'}</td>
+          <td class="${dt.net_buy_wan >= 0 ? 'up' : 'down'}">${dt.net_buy_wan >= 0 ? '+' : ''}${(dt.net_buy_wan/10000).toFixed(2)}亿</td>
+          <td>${dt.buy_wan}万</td><td>${dt.sell_wan}万</td>
+          <td style="font-size:11px;max-width:200px;">${dt.reason||'-'}</td></tr>`;
       });
-      html += '</div></div>';
+      dataHtml += '</tbody></table></div></div>';
     }
 
-    // ── 强势股 ──
     if (!hr.error && hr.hot_stocks && hr.hot_stocks.length > 0) {
-      html += `<div class="detail-card"><div class="detail-card-header">⚡ 强势股 · ${hr.hot_stocks.length} 条</div><div class="detail-card-body">`;
+      dataHtml += `<div class="detail-card" id="sec-hotstocks"><div class="detail-card-header">⚡ 强势股 · ${hr.hot_stocks.length} 条</div>
+        <div class="detail-card-body" style="padding:0;overflow-x:auto;">
+        <table class="job-table"><thead><tr><th>代码</th><th>名称</th><th>板块</th><th>行业</th><th>涨跌幅</th><th>市值(亿)</th><th>换手率</th><th>成交额(万)</th><th>标签</th></tr></thead><tbody>`;
       hr.hot_stocks.forEach(h => {
         const cls = h.change_pct >= 0 ? 'up' : 'down';
-        html += `<div class="hot-item">
-          <span class="hot-name">${h.name}</span><span class="dt-code">${h.code}</span>
-          <span class="hot-pct ${cls}">${h.change_pct >= 0 ? '+' : ''}${h.change_pct}%</span>
-          ${h.tags ? `<span class="hot-tags">${h.tags}</span>` : ''}</div>`;
+        dataHtml += `<tr>
+          <td class="code-cell">${codeLink(h.code)}</td><td style="font-weight:600;">${h.name}</td>
+          <td style="font-size:11px;">${getStockSector(h.code)}</td>
+          <td style="font-size:11px;">${getStockIndustry(h.code)}</td>
+          <td class="${cls}">${h.change_pct >= 0 ? '+' : ''}${h.change_pct}%</td>
+          <td>${h.mcap != null ? h.mcap.toFixed(1)+'亿' : '-'}</td>
+          <td>${h.turnover_pct != null ? h.turnover_pct+'%' : '-'}</td>
+          <td>${h.amount != null ? (h.amount/1e4).toFixed(0)+'万' : '-'}</td>
+          <td style="font-size:11px;">${h.tags || '-'}</td></tr>`;
       });
-      html += '</div></div>';
+      dataHtml += '</tbody></table></div></div>';
     }
 
-    if (!html) {
-      html = '<div class="detail-card"><div class="detail-card-body"><div class="empty-state"><span class="empty-icon">📊</span>当日无A股数据</div></div></div>';
+    if (!dataHtml) {
+      dataHtml = '<div class="detail-card"><div class="detail-card-body"><div class="empty-state"><span class="empty-icon">📊</span>当日无A股数据</div></div></div>';
     }
-    document.getElementById('detail-content').innerHTML = html;
+
+    // ── 因子库 Tab 占位 ──
+    const factorsHtml = '<div id="factors-tab-content"><div class="detail-card"><div class="detail-card-body"><div class="empty-state"><span class="empty-icon">🧬</span>点击「因子库」标签加载</div></div></div></div>';
+    const compositeHtml = '<div id="composite-tab-content"><div class="detail-card"><div class="detail-card-body"><div class="empty-state"><span class="empty-icon">🧩</span>点击「组合因子」标签加载</div></div></div></div>';
+    const backtestHtml = '<div id="backtest-tab-content"><div class="detail-card"><div class="detail-card-body"><div class="empty-state"><span class="empty-icon">📈</span>点击「回测」标签加载</div></div></div></div>';
+    const btSystemHtml = '<div id="btsystem-tab-content"><div class="detail-card"><div class="detail-card-body"><div class="empty-state"><span class="empty-icon">📈</span>点击「回测系统」标签加载</div></div></div></div>';
+
+    document.getElementById('detail-content').innerHTML =
+      `<div class="stocks-layout">${sidebar}
+      <div class="stocks-main">
+        <div id="stocks-data-tab" style="display:${_stocksTab === 'data' ? 'block' : 'none'};">${dataHtml}</div>
+        <div id="stocks-factors-tab" style="display:${_stocksTab === 'factors' ? 'block' : 'none'};">${factorsHtml}</div>
+        <div id="stocks-composite-tab" style="display:${_stocksTab === 'composite' ? 'block' : 'none'};">${compositeHtml}</div>
+        <div id="stocks-backtest-tab" style="display:${_stocksTab === 'backtest' ? 'block' : 'none'};">${backtestHtml}</div>
+        <div id="stocks-btsystem-tab" style="display:${_stocksTab === 'bt-system' ? 'block' : 'none'};">${btSystemHtml}</div>
+      </div></div>`
+
+    if (_stocksTab === 'factors') { loadFactorsTab(); }
+    if (_stocksTab === 'composite') { loadCompositeTab(); }
+    if (_stocksTab === 'backtest') { loadBacktestTab(); }
+    if (_stocksTab === 'bt-system') { loadBTSystemTab(); }
   } catch(e) { console.error(e); }
+}
+
+async function checkDataHealth() {
+  try {
+    const health = await fetch(`/api/stocks/health?date=${_stocksDate}`).then(r => r.json());
+    const meta = document.getElementById('detail-meta');
+    if (!meta) return;
+    meta.querySelectorAll('.health-status').forEach(e => e.remove());
+
+    let dot = '';
+    if (health.is_weekend) {
+      dot = '<span style="font-size:11px;color:var(--fg-muted);margin-left:6px;">(休市)</span>';
+    } else if (health.today_status === 'ok') {
+      dot = '<span class="health-status" style="font-size:11px;color:var(--accent);margin-left:6px;" title="数据完整">●</span>';
+    } else if (health.today_status === 'partial') {
+      dot = '<span class="health-status" style="font-size:11px;color:var(--warning);margin-left:6px;" title="部分数据缺失">●</span>';
+    } else {
+      const ltd = health.latest_trading_date || '未知';
+      dot = `<span class="health-status" style="font-size:11px;color:var(--danger);margin-left:6px;" title="无数据，最新: ${ltd}">●</span>`;
+    }
+    meta.insertAdjacentHTML('beforeend', dot);
+  } catch(e) { /* ignore */ }
+}
+
+let _stockDates = [];
+
+async function initStocksDateNav() {
+  try {
+    const r = await fetch('/api/stocks/dates').then(r => r.json());
+    _stockDates = r.dates || [];
+  } catch(e) { _stockDates = []; }
+  if (!_stockDates.includes(today)) _stockDates.push(today);
+  _stockDates.sort();
+  renderStocksDateNav();
+}
+
+function renderStocksDateNav() {
+  const meta = document.getElementById('detail-meta');
+  if (!meta) return;
+  const todayStr = new Date().toISOString().slice(0,10);
+  const idx = _stockDates.indexOf(_stocksDate);
+  // 始终展示9个日期，当前居中
+  const N = 9;
+  let start = idx - Math.floor(N / 2);
+  let end = start + N;
+  if (start < 0) { start = 0; end = Math.min(N, _stockDates.length); }
+  if (end > _stockDates.length) { end = _stockDates.length; start = Math.max(0, end - N); }
+  const visible = _stockDates.slice(start, end);
+
+  let html = '<span class="date-nav-inline">';
+  html += `<button class="date-nav-btn" onclick="stocksDateNav(-1)" ${idx <= 0 ? 'disabled' : ''}>◀</button>`;
+  visible.forEach(d => {
+    const cls = ['date-chip'];
+    if (d === _stocksDate) cls.push('selected');
+    if (d === todayStr) cls.push('today-chip');
+    html += `<button class="${cls.join(' ')}" onclick="changeStocksDate('${d}')">${d.slice(5)}</button>`;
+  });
+  html += `<button class="date-nav-btn" onclick="stocksDateNav(1)" ${idx >= _stockDates.length - 1 ? 'disabled' : ''}>▶</button>`;
+  html += `<button class="date-nav-today-btn" onclick="changeStocksDate('${todayStr}')">今天</button>`;
+  html += `<span style="position:relative;display:inline-block;">
+    <button class="date-nav-btn" onclick="document.getElementById('date-jump-input').classList.toggle('hidden')" title="跳转日期">📅</button>
+    <input type="date" id="date-jump-input" class="date-jump-input hidden" value="${_stocksDate}"
+      onchange="this.classList.add('hidden');changeStocksDate(this.value)"
+      onblur="this.classList.add('hidden')">
+  </span>`;
+  html += `<span class="date-nav-label">${_stocksDate}</span>`;
+  html += '</span>';
+
+  meta.innerHTML = html;
+  checkDataHealth();
+}
+
+function stocksDateNav(dir) {
+  const idx = _stockDates.indexOf(_stocksDate);
+  if (idx < 0) return;
+  const ni = idx + dir;
+  if (ni >= 0 && ni < _stockDates.length) {
+    changeStocksDate(_stockDates[ni]);
+    renderStocksDateNav();
+  }
+}
+
+function changeStocksDate(newDate) {
+  _stocksDate = newDate;
+  renderStocksDateNav();
+  _factorsMeta = null;
+  loadStocksDetail();
+}
+
+// ═══ 因子库 Tab ═══
+const FILTER_CN = {st:'剔除ST', new_stock:'剔除新股', liquidity:'剔除低成交', limit:'剔除涨跌停'};
+function filterCN(keys) {
+  if (!keys || !keys.length) return '剔除ST、新股、低成交';
+  return keys.map(k => FILTER_CN[k] || k).join('、');
+}
+
+function selectFactor(name) {
+  document.getElementById('factor-select').value = name;
+  document.querySelectorAll('.factor-chip').forEach(c => c.classList.toggle('selected', c.id === 'fcard-' + name));
+}
+
+function showFactorDetail(name) {
+  const meta = FACTOR_META[name] || {};
+  const f = (_factorsMeta?.factors || []).find(x => x.name === name) || {};
+
+  const overlay = document.createElement('div');
+  overlay.className = 'fam-modal-overlay'; overlay.id = 'factor-detail-overlay';
+  overlay.innerHTML = `<div class="fam-modal" style="max-width:460px;">
+    <div class="fam-modal-header">
+      <span><code style="font-size:14px;">${name}</code> &nbsp; ${f.desc || ''}</span>
+      <button class="fam-modal-close" onclick="this.closest('.fam-modal-overlay').remove()">✕</button>
+    </div>
+    <div class="fam-modal-body" style="line-height:1.8;">
+      <div style="margin-bottom:14px;font-size:13px;color:var(--fg-secondary);">${meta.desc || '暂无描述'}</div>
+      <div><span style="font-size:11px;color:var(--fg-muted);">计算公式</span><br><code style="font-size:12px;background:var(--bg-surface);padding:6px 10px;border-radius:4px;display:inline-block;margin-top:4px;">${meta.formula || '暂无'}</code></div>
+    </div>
+  </div>`;
+  document.body.appendChild(overlay);
+  overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
+  overlay.querySelector('.fam-modal-close').addEventListener('click', () => overlay.remove());
+}
+
+function getFactorLabel(name) {
+  if (!_factorsMeta) return name;
+  const f = _factorsMeta.factors.find(x => x.name === name);
+  return f ? `${name} — ${f.desc}` : name;
+}
+
+function sortFilterTable(tableId, colIdx) {
+  const table = document.getElementById(tableId);
+  if (!table) return;
+  const tbody = table.querySelector('tbody');
+  const rows = Array.from(tbody.querySelectorAll('tr'));
+  // Toggle direction: same column reverses
+  const th = table.querySelectorAll('th')[colIdx];
+  const curDir = th.dataset.dir === 'asc' ? 'desc' : 'asc';
+  // Clear arrows on all headers
+  table.querySelectorAll('th').forEach(h => { h.dataset.dir = ''; h.querySelector('.sort-arrow').textContent = ''; });
+  th.dataset.dir = curDir;
+  th.querySelector('.sort-arrow').textContent = curDir === 'asc' ? '▲' : '▼';
+
+  rows.sort((a, b) => {
+    let va = a.querySelectorAll('td')[colIdx]?.dataset.sort || '';
+    let vb = b.querySelectorAll('td')[colIdx]?.dataset.sort || '';
+    // Numeric comparison
+    let na = parseFloat(va), nb = parseFloat(vb);
+    if (!isNaN(na) && !isNaN(nb)) {
+      return curDir === 'asc' ? na - nb : nb - na;
+    }
+    // String comparison
+    return curDir === 'asc' ? String(va).localeCompare(String(vb)) : String(vb).localeCompare(String(va));
+  });
+  rows.forEach(r => tbody.appendChild(r));
+}
+
+function setTopN(n, el) {
+  document.getElementById('factor-topn').value = n;
+  document.querySelectorAll('.topn-chip').forEach(c => c.classList.remove('active'));
+  if (el) el.classList.add('active');
+}
+
+async function loadFilterSnapshot() {
+  const area = document.getElementById('filter-snapshot-area');
+  if (!area) return;
+
+  let snap;
+  try {
+    snap = await fetch(`/api/factors/filters?date=${_stocksDate}`).then(r => r.json());
+  } catch(e) { snap = null; }
+
+  if (!snap || snap.error) { area.innerHTML = snap?.message ? `<div class="detail-card" style="margin-top:var(--space-4);"><div class="detail-card-body"><div class="empty-state"><span class="empty-icon">⚠️</span>${snap.message}</div></div></div>` : ''; return; }
+  if (!snap.filters) { area.innerHTML = ''; return; }
+
+  // 只展示当前生效的过滤（st, new_stock, liquidity）
+  const activeFilterNames = ['st', 'new_stock', 'liquidity'];
+  const filterNames = Object.keys(snap.filters).filter(k => activeFilterNames.includes(k));
+  let total = 0;
+  filterNames.forEach(k => { total += (snap.filters[k].stocks || []).length; });
+
+  const colLabels = {code:'代码', name:'名称', change_pct:'涨跌幅', close:'收盘价', mcap:'市值', turnover_pct:'换手率', amount_avg_30d:'日均成交'};
+  const cols = ['code', 'name', 'change_pct', 'close', 'mcap', 'turnover_pct', 'amount_avg_30d'];
+
+  let html = `<div class="detail-card" style="margin-top:var(--space-4);">
+    <div class="detail-card-header">🚫 当日剔除因子 · ${snap.date} · ${filterNames.length} 项过滤 · 共剔除 ${total} 只</div>
+    <div class="detail-card-body" style="padding:0;">
+      <div class="filter-snap-list">`;
+
+  filterNames.forEach((fname, fi) => {
+    const fdata = snap.filters[fname];
+    const stocks = fdata.stocks || [];
+    const tableId = 'fs-table-' + fname;
+    html += `<div class="filter-snap-row" id="fsr-${fname}">
+      <div class="filter-snap-row-header" onclick="document.getElementById('fsr-${fname}').classList.toggle('expanded')">
+        <span class="fsr-icon">🔻</span>
+        <span class="fsr-name">${FILTER_CN[fname] || fname}</span>
+        <span class="fsr-desc">${fdata.desc}</span>
+        <span class="fsr-count">${stocks.length} 只</span>
+        <span class="fsr-arrow">▶</span>
+      </div>
+      <div class="filter-snap-stocks">
+        <table class="job-table" id="${tableId}"><thead><tr>${cols.map((c,i) => `<th onclick="sortFilterTable('${tableId}',${i})" title="点击排序">${colLabels[c]}<span class="sort-arrow"></span></th>`).join('')}</tr></thead><tbody>`;
+    stocks.forEach((s, si) => {
+      // Store raw values in data attributes for sorting
+      html += '<tr>';
+      cols.forEach((col, ci) => {
+        let raw = s[col] !== undefined && s[col] !== null ? s[col] : '';
+        let val = col === 'code' ? codeLink(raw) : raw;
+        let cls = '';
+        if (col === 'change_pct') {
+          if (typeof val === 'number') { val = (val >= 0 ? '+' : '') + val.toFixed(2) + '%'; }
+          const sign = String(val).charAt(0);
+          cls = sign === '+' ? 'up' : (sign === '-' ? 'down' : '');
+        }
+        if (col === 'close' && typeof val === 'number') val = val.toFixed(2);
+        if (col === 'mcap' && typeof val === 'number') val = val.toFixed(1) + '亿';
+        if (col === 'turnover_pct' && typeof val === 'number') val = val.toFixed(2) + '%';
+        if (col === 'amount_avg_30d' && typeof val === 'number') val = (val / 1e4).toFixed(0) + '万';
+        html += `<td class="${cls}" data-sort="${raw}">${val}</td>`;
+      });
+      html += '</tr>';
+    });
+    html += '</tbody></table></div></div>';
+  });
+
+  html += '</div></div></div>';
+  area.innerHTML = html;
+}
+
+async function switchStocksTab(tab) {
+  _stocksTab = tab;
+  document.querySelectorAll('.stocks-tab').forEach((el, i) => {
+    el.classList.toggle('active', (i === 0 && tab === 'data') || (i === 1 && tab === 'factors') || (i === 2 && tab === 'composite') || (i === 3 && tab === 'backtest') || (i === 4 && tab === 'bt-system'));
+  });
+  document.getElementById('stocks-data-tab').style.display = tab === 'data' ? 'block' : 'none';
+  document.getElementById('stocks-factors-tab').style.display = tab === 'factors' ? 'block' : 'none';
+  document.getElementById('stocks-composite-tab').style.display = tab === 'composite' ? 'block' : 'none';
+  document.getElementById('stocks-backtest-tab').style.display = tab === 'backtest' ? 'block' : 'none';
+  document.getElementById('stocks-btsystem-tab').style.display = tab === 'bt-system' ? 'block' : 'none';
+
+  if (tab === 'factors') { loadFactorsTab(); }
+  if (tab === 'composite') { loadCompositeTab(); }
+  if (tab === 'backtest') { loadBacktestTab(); }
+  if (tab === 'bt-system') { loadBTSystemTab(); }
+}
+
+function loadBTSystemTab() {
+  const container = document.getElementById('stocks-btsystem-tab');
+  if (!container) return;
+  let html = `<div class="detail-card" style="margin-bottom:var(--space-4);">
+    <div class="detail-card-header">📈 回测系统</div>
+    <div class="detail-card-body">
+      <div class="bt-param-row">
+        <label>因子 <select id="bt-factor" class="bt-select" style="min-width:220px;"><option value="composite_short" selected>composite_short — 短线组合</option></select></label>
+        <label>Top N <select id="bt-topn" class="bt-select" style="width:70px;"><option>5</option><option selected>10</option><option>15</option><option>20</option></select></label>
+        <label>持有 <select id="bt-hold" class="bt-select" style="width:70px;"><option>1</option><option>3</option><option selected>5</option><option>10</option><option>20</option></select> 天</label>
+        <label>调仓 <select id="bt-rebal" class="bt-select" style="width:80px;"><option selected>每日</option></select></label>
+      </div>
+      <div class="bt-param-row">
+        <span style="font-size:12px;color:var(--fg-muted);">回测区间: 2026-05-13 ~ ${_stocksDate} · T日信号 → T+1开盘买入 → 持有N天 → 收盘卖出</span>
+      </div>
+      <div class="bt-param-row">
+        <button class="factor-run-btn" onclick="runBTSystem()">▶ 开始回测</button>
+        <span id="bt-system-status" style="font-size:12px;color:var(--fg-muted);"></span>
+      </div>
+    </div>
+  </div>
+  <div id="bt-system-result"></div>`;
+  container.innerHTML = html;
+}
+
+async function runBTSystem() {
+  const status = document.getElementById('bt-system-status');
+  if (status) status.textContent = '⏳ 回测中...';
+  try {
+    const factor = document.getElementById('bt-factor')?.value || 'composite_short';
+    const topN = parseInt(document.getElementById('bt-topn')?.value || '10');
+    const hold = parseInt(document.getElementById('bt-hold')?.value || '5');
+    const result = await fetch('/api/backtest/run', {method:'POST',headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({factor_name:factor, top_n:topN, start_date:'2026-01-01'})}).then(r=>r.json());
+    if (status) status.textContent = result.error ? '❌ 失败' : '✅ 完成 · ' + (result.summary?.total_days||'') + '天';
+    if (result.error) return;
+    const s = result.summary;
+    let html = '<div class="detail-card"><div class="detail-card-header">📊 回测结果</div><div class="detail-card-body"><div style="display:flex;gap:var(--space-4);flex-wrap:wrap;">';
+    [['总收益',s.total_return],['基准',s.benchmark_return],['超额',s.excess_return],['夏普',s.sharpe],['回撤',s.max_drawdown],['胜率',s.win_rate],['均盈',s.avg_win],['均亏',s.avg_loss]].forEach(([l,v])=>{
+      const c = v && String(v).startsWith('+') ? 'var(--accent)' : v && String(v).startsWith('-') ? 'var(--danger)' : 'var(--fg-primary)';
+      html += '<div style="text-align:center;min-width:80px;"><div style="font-size:11px;color:var(--fg-muted);">'+l+'</div><div style="font-size:18px;font-weight:700;color:'+c+';">'+ (v||'-') +'</div></div>';
+    });
+    html += '</div></div></div>';
+    document.getElementById('bt-system-result').innerHTML = html;
+    if (result.daily && result.daily.length > 0) {
+      drawBacktestChart(result.daily);
+      document.getElementById('bt-system-result').innerHTML += '<div id="backtest-chart-area" style="margin-top:0;"></div>';
+      setTimeout(() => drawBacktestChart(result.daily), 200);
+    }
+  } catch(e) { if (status) status.textContent = '❌ 失败'; }
+}
+
+function loadBacktestTab() {
+  const container = document.getElementById('stocks-backtest-tab');
+  if (!container) return;
+  let html = `<div class="detail-card" style="margin-bottom:var(--space-4);">
+    <div class="detail-card-header">🔬 因子测试</div>
+    <div class="detail-card-body">
+      <div class="bt-param-row">
+        <label>因子 <select id="research-factor" class="bt-select" style="min-width:220px;">
+          <optgroup label="组合因子"><option value="composite_short" selected>composite_short — 短线组合</option></optgroup>
+          <optgroup label="涨跌幅"><option value="ret_5d">ret_5d — 近五日涨幅</option><option value="ret_10d">ret_10d — 近十日涨幅</option><option value="ret_20d">ret_20d — 近二十日涨幅</option></optgroup>
+          <optgroup label="量能"><option value="vol_ratio_5d">vol_ratio_5d — 5日量比</option><option value="vol_ratio_20d">vol_ratio_20d — 20日量比</option><option value="vol_stability_5d">vol_stability_5d — 量能稳定性</option><option value="turnover_5d">turnover_5d — 换手率</option><option value="volatility_20d">volatility_20d — 波动率</option><option value="amount_ratio">amount_ratio — 成交额比</option></optgroup>
+          <optgroup label="形态"><option value="trend_alignment">trend_alignment — 趋势排列</option><option value="ma20_slope">ma20_slope — MA20斜率</option><option value="ma20_pullback">ma20_pullback — MA20回踩</option><option value="bb_width">bb_width — 布林带收敛</option><option value="amp_contract">amp_contract — 振幅收缩</option><option value="breakout_60d">breakout_60d — 突破因子</option></optgroup>
+          <optgroup label="位置"><option value="price_position_20d">price_position_20d — 价格位置(20)</option><option value="price_position_40d">price_position_40d — 价格位置(40)</option><option value="price_position_60d">price_position_60d — 价格位置(60)</option></optgroup>
+          <optgroup label="综合"><option value="sector_strength">sector_strength — 板块强度</option><option value="rel_strength">rel_strength — 相对强度</option><option value="small_cap">small_cap — 市值因子</option><option value="vol_price_div">vol_price_div — 量价背离</option></optgroup>
+        </select></label>
+        <label>起始 <input type="date" id="research-start" class="bt-select" value="2025-01-02" style="width:130px;"></label>
+        <label>截止 <input type="date" id="research-end" class="bt-select" value="${_stocksDate}" style="width:130px;"></label>
+      </div>
+      <div class="bt-param-row">
+        <button class="factor-run-btn" onclick="runFactorTest()">▶ 执行测试</button>
+        <span id="research-status" style="font-size:12px;color:var(--fg-muted);"></span>
+        <span style="font-size:11px;color:var(--fg-muted);">自动生成 IC分析 + 分层收益 + 十分位</span>
+      </div>
+    </div>
+  </div>
+  <div id="research-result-area"></div>`;
+  container.innerHTML = html;
+  loadResearchHistory();
+}
+
+async function loadResearchHistory() {
+  try {
+    const hist = await fetch('/api/research/history').then(r=>r.json());
+    if (!hist || hist.length === 0) return;
+    let oldEl = document.getElementById('research-history-card');
+    if (oldEl) oldEl.remove();
+    let h = '<div class="detail-card" style="margin-bottom:var(--space-4);" id="research-history-card"><div class="detail-card-header">📜 执行记录 · ' + hist.length + ' 条</div><div class="detail-card-body" style="padding:0;"><div class="factor-history-list">';
+    hist.forEach(r => {
+      const desc = r.factor_desc ? ' — ' + r.factor_desc : '';
+      const dateRange = r.start_date ? r.start_date + ' ~ ' + (r.end_date||'') : '';
+      const days = r.total_days ? r.total_days + '天' : '';
+      const timeStr = (r.run_at||'').slice(0,19).replace('T',' ');
+      h += '<div class="factor-history-item" id="fhi-research-' + r.id + '" ><span class="fhi-body" onclick="loadResearchRecord(\'' + r.factor_name + '\',' + r.id + ')"><span class="fhi-factor">#' + r.id + ' 🧬 ' + r.factor_name + desc + '</span><span class="fhi-date">' + dateRange + '</span><span class="fhi-count">' + days + '</span><span class="fhi-saved">' + timeStr + '</span></span><button class="fhi-del-btn" onclick="event.stopPropagation();deleteResearchRecord(' + r.id + ')" title="删除">🗑</button></div>';
+    });
+    h += '</div></div></div>';
+    const area = document.getElementById('research-result-area');
+    if (area) area.insertAdjacentHTML('beforebegin', h);
+  } catch(e) {}
+}
+
+async function deleteResearchRecord(id) {
+  if (!confirm('删除这条记录及相关IC数据？')) return;
+  await fetch('/api/research/history?id=' + id, {method:'DELETE'});
+  const el = document.getElementById('fhi-research-' + id);
+  if (el) el.remove();
+}
+
+function selectResearchFactor(fn) {
+  const sel = document.getElementById('research-factor');
+  if (sel) sel.value = fn;
+}
+
+async function loadResearchRecord(fn, id) {
+  selectResearchFactor(fn);
+  const status = document.getElementById('research-status');
+  if (status) status.textContent = '⏳ 加载中...';
+  try {
+    const histList = await fetch('/api/research/history').then(r=>r.json());
+    const record = histList.find(r => r.id === id);
+    if (!record || !record.has_detail) { if (status) status.textContent = '⚠️ 无缓存，请执行测试'; return; }
+    const detail = await fetch('/api/research/history?id=' + id).then(r=>r.json());
+    if (detail.error) { if (status) status.textContent = '⚠️ 无缓存'; return; }
+    document.querySelectorAll('.factor-history-item').forEach(el => el.classList.remove('active'));
+    const activeEl = document.getElementById('fhi-research-' + id);
+    if (activeEl) activeEl.classList.add('active');
+    renderResearchResult({ic:detail.ic}, {layers:detail.layers}, detail.quantile);
+    if (status) status.textContent = '📦 查看 #' + id + ' · ' + detail.factor_name;
+  } catch(e) { if (status) status.textContent = '❌ 失败'; }
+}
+
+function renderResearchResult(icR, layerR, qData) {
+  let html = '';
+  if (icR.ic) {
+    html += '<div class="detail-card" style="margin-bottom:var(--space-4);"><div class="detail-card-header">📊 IC 分析</div><div class="detail-card-body" style="padding:0;overflow-x:auto;"><table class="job-table"><thead><tr><th>持有期</th><th>IC</th><th>天数</th></tr></thead><tbody>';
+    Object.entries(icR.ic).forEach(([h,v]) => {
+      html += '<tr><td>'+h+'</td><td class="'+(v.ic>0?'up':'down')+'">'+(v.ic>=0?'+':'')+v.ic.toFixed(4)+'</td><td>'+v.days+'</td></tr>';
+    });
+    html += '</tbody></table></div></div>';
+  }
+  if (layerR.layers) {
+    html += '<div class="detail-card" style="margin-bottom:var(--space-4);"><div class="detail-card-header">📋 分层收益</div><div class="detail-card-body" style="padding:0;overflow-x:auto;"><table class="job-table"><thead><tr><th>持有期</th><th>Top10</th><th>Top20</th><th>Top50</th><th>单调</th></tr></thead><tbody>';
+    Object.entries(layerR.layers).forEach(([h,data]) => {
+      const t10=data.top10||{}, t20=data.top20||{}, t50=data.top50||{};
+      html += '<tr><td>'+h+'</td><td class="'+(t10.avg>=0?'up':'down')+'">'+(t10.avg>=0?'+':'')+t10.avg+'%</td><td class="'+(t20.avg>=0?'up':'down')+'">'+(t20.avg>=0?'+':'')+t20.avg+'%</td><td class="'+(t50.avg>=0?'up':'down')+'">'+(t50.avg>=0?'+':'')+t50.avg+'%</td><td>'+(t10.avg>t20.avg&&t20.avg>t50.avg?'✅':'⚠️')+'</td></tr>';
+    });
+    html += '</tbody></table></div></div>';
+  }
+  if (qData && qData.length) {
+    const horizons = [...new Set(qData.map(r=>r.horizon))];
+    html += '<div class="detail-card"><div class="detail-card-header">📐 十分位</div><div class="detail-card-body" style="padding:0;overflow-x:auto;"><table class="job-table"><thead><tr><th>持有期</th><th>Q1</th><th>Q2</th><th>Q3</th><th>Q4</th><th>Q5</th><th>Q6</th><th>Q7</th><th>Q8</th><th>Q9</th><th>Q10</th></tr></thead><tbody>';
+    horizons.forEach(h => {
+      html += '<tr><td>'+h+'</td>';
+      for (let q=1; q<=10; q++) {
+        const row = qData.find(r=>r.horizon===h&&r.quantile==='Q'+q);
+        const v = row ? row.avg_return : null;
+        html += '<td class="'+(v!==null&&v>0?'up':'down')+'">'+(v!==null?(v>=0?'+':'')+v+'%':'-')+'</td>';
+      }
+      html += '</tr>';
+    });
+    html += '</tbody></table></div></div>';
+  }
+  document.getElementById('research-result-area').innerHTML = html || '<div class="empty-state">无数据</div>';
+}
+
+async function runFactorTest() {
+  const factor = document.getElementById('research-factor')?.value || 'composite_short';
+  const status = document.getElementById('research-status');
+  if (status) status.textContent = '⏳ 测试中...';
+  try {
+    const sd = document.getElementById('research-start')?.value || '2025-01-02';
+    const ed = document.getElementById('research-end')?.value || _stocksDate;
+    const result = await fetch('/api/research/run', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({factor_name:factor, start_date:sd, end_date:ed})}).then(r=>r.json());
+    if (status) status.textContent = '✅ 完成 · ' + factor;
+    const icR = {ic: result.ic}, layerR = {layers: result.layers};
+    renderResearchResult(icR, layerR, result.quantile);
+    // 保存执行记录
+    try {
+      const ic = result.ic || {};
+      const ly = (result.layers || {}).ret_5d || {};
+      const sd = document.getElementById('research-start')?.value || '2026-05-13';
+      const ed = document.getElementById('research-end')?.value || _stocksDate;
+      const totalDays = ic.ret_5d?.days || 0;
+      const fdesc = document.getElementById('research-factor')?.selectedOptions[0]?.text?.split(' — ')[1] || '';
+      const saveResp = await fetch('/api/research/history', {method:'POST',headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({factor_name:factor, start_date:sd, end_date:ed, total_days:totalDays, factor_desc:fdesc,
+          ic_ret3:ic.ret_3d?.ic, ic_ret5:ic.ret_5d?.ic, ic_ret10:ic.ret_10d?.ic, ic_ret20:ic.ret_20d?.ic,
+          layer_top10_5d:ly.top10?.avg, layer_top20_5d:ly.top20?.avg, layer_top50_5d:ly.top50?.avg,
+          monotonic_5d: (ly.top10?.avg||0)>(ly.top20?.avg||0) && (ly.top20?.avg||0)>(ly.top50?.avg||0),
+          detail: result})}).then(r=>r.json());
+      await loadResearchHistory();
+      // 高亮新纪录
+      if (saveResp.ok) {
+        const hist = await fetch('/api/research/history').then(r=>r.json());
+        const latest = hist[0];
+        if (latest) {
+          document.querySelectorAll('.factor-history-item').forEach(el => el.classList.remove('active'));
+          const el = document.getElementById('fhi-research-' + latest.id);
+          if (el) el.classList.add('active');
+          if (status) status.textContent = '✅ 完成 · #' + latest.id + ' · ' + factor;
+        }
+      }
+    } catch(e) {}
+  } catch(e) { if (status) status.textContent = '❌ 失败'; }
+}
+
+async function loadBacktestHistory() {
+  const area = document.getElementById('backtest-history-area');
+  if (!area) return;
+  try {
+    const hist = await fetch('/api/backtest/history').then(r => r.json());
+    if (!hist || hist.length === 0) { area.innerHTML = ''; return; }
+    let h = '<div class="detail-card" style="margin-top:var(--space-4);"><div class="detail-card-header">📜 回测历史 · ' + hist.length + ' 条</div><div class="detail-card-body" style="padding:0;"><div class="factor-history-list">';
+    hist.forEach(r => {
+      h += '<div class="factor-history-item" onclick="loadBacktestResult(\'' + r.cache_key + '\')"><span class="fhi-body"><span class="fhi-factor">📈 ' + r.type + '</span><span class="fhi-count">' + (r.total_return||'') + '</span><span class="fhi-time">' + r.total_days + '天</span><span class="fhi-saved">' + (r.saved_at||'').slice(11,19) + '</span></span></div>';
+    });
+    h += '</div></div></div>';
+    area.innerHTML = h;
+  } catch(e) {}
+}
+
+async function loadBacktestResult(cacheKey) {
+  document.querySelectorAll('#backtest-history-area .factor-history-item').forEach(el => el.classList.toggle('active', el.onclick && el.onclick.toString().includes(cacheKey)));
+  try {
+    const result = await fetch('/api/backtest/result/' + cacheKey).then(r => r.json());
+    if (result.error) return;
+    // Render backtest or layer results
+    if (result.summary) {
+      const s = result.summary;
+      let sumHtml = '<div class="detail-card" style="margin-top:0;"><div class="detail-card-header">📊 历史结果 · ' + (result.signal_days||s.total_days||'') + ' 天</div><div class="detail-card-body"><div style="display:flex;gap:var(--space-4);flex-wrap:wrap;">';
+      [['总收益',s.total_return,s.total_return&&s.total_return.startsWith('+')?'var(--accent)':'var(--danger)'],
+       ['超额',s.excess_return,s.excess_return&&s.excess_return.startsWith('+')?'var(--accent)':'var(--danger)'],
+       ['夏普',s.sharpe,'var(--accent-3)'],['回撤',s.max_drawdown,'var(--danger)'],['胜率',s.win_rate,'var(--fg-primary)'],
+       ['均盈',s.avg_win,'var(--accent)'],['均亏',s.avg_loss,'var(--danger)']].forEach(([l,v,c]) => {
+        if (v) sumHtml += '<div style="text-align:center;min-width:80px;"><div style="font-size:11px;color:var(--fg-muted);">'+l+'</div><div style="font-size:18px;font-weight:700;color:'+c+';">'+v+'</div></div>';
+      });
+      sumHtml += '</div></div></div>';
+      document.getElementById('backtest-summary-area').innerHTML = sumHtml;
+    }
+    if (result.daily && result.daily.length > 0) drawBacktestChart(result.daily);
+    if (result.exit_modes) {
+      let layerHtml = '<div class="detail-card"><div class="detail-card-header">📊 分层分析</div><div class="detail-card-body">';
+      result.exit_modes.forEach(em => {
+        layerHtml += '<div style="margin-bottom:8px;"><b>'+em+'</b><div style="display:flex;gap:8px;">';
+        ['top10','top20','top50'].forEach(k => {
+          const key = k+'_'+(em==='固定持有'?'fixed':em==='跌出Top20卖'?'rank_drop':'ma20');
+          const v = result.summary[key]; if(!v) return;
+          layerHtml += '<span style="font-size:12px;color:var(--fg-secondary);">'+k+': '+v.avg+' ('+v.win_rate+')</span>';
+        });
+        layerHtml += '</div></div>';
+      });
+      layerHtml += '</div></div>';
+      document.getElementById('backtest-layer-area').innerHTML = layerHtml;
+    }
+  } catch(e) {}
+}
+
+async function _old_showICTable() {
+  const status = document.getElementById('backtest-status');
+  if (status) status.textContent = '⏳ 加载中...';
+  try {
+    const result = await fetch('/api/research/stats').then(r => r.json());
+    if (status) status.textContent = '✅ 完成';
+    if (result.error) return;
+    const icData = result.ic || [];
+    const horizons = [...new Set(icData.map(r => r.horizon))];
+
+    let html = '<div class="detail-card" style="margin-top:var(--space-4);"><div class="detail-card-header">📊 因子IC分析</div><div class="detail-card-body" style="padding:0;overflow-x:auto;"><table class="job-table"><thead><tr><th>因子</th>' + horizons.map(h => '<th>' + h + '</th>').join('') + '</tr></thead><tbody>';
+    const factors = [...new Set(icData.map(r => r.factor_name))];
+    factors.forEach(fn => {
+      html += '<tr><td style="font-size:12px;">' + fn + '</td>';
+      horizons.forEach(h => {
+        const row = icData.find(r => r.factor_name === fn && r.horizon === h);
+        const v = row ? parseFloat(row.ic) : null;
+        const valid = v !== null && !isNaN(v);
+        const cls = valid ? (v > 0 ? 'up' : 'down') : '';
+        html += '<td class="' + cls + '" style="font-size:12px;">' + (valid ? (v>=0?'+':'') + v.toFixed(3) : '-') + '</td>';
+      });
+      html += '</tr>';
+    });
+    html += '</tbody></table></div></div>';
+    document.getElementById('backtest-layer-area').innerHTML = html;
+  } catch(e) { if (status) status.textContent = '❌ 失败'; }
+}
+
+// Removed
+async function _old_runResearchIC() {
+  const factor = document.getElementById('research-factor')?.value || 'composite_short';
+  const status = document.getElementById('research-status');
+  if (status) status.textContent = '⏳ IC测试中...';
+  try {
+    const r = await fetch('/api/research/ic-test', {method:'POST',headers:{'Content-Type':'application/json'},body: JSON.stringify({factor_name:factor})}).then(r=>r.json());
+    if (status) status.textContent = '✅ 完成';
+    if (r.error) return;
+    const ic = r.ic || {};
+    let html = '<div class="detail-card" style="margin-bottom:var(--space-4);"><div class="detail-card-header">📊 IC 分析 · ' + factor + '</div><div class="detail-card-body" style="padding:0;overflow-x:auto;"><table class="job-table"><thead><tr><th>持有期</th><th>IC</th><th>天数</th></tr></thead><tbody>';
+    Object.entries(ic).forEach(([h,v]) => {
+      const cls = v.ic > 0 ? 'up' : 'down';
+      html += '<tr><td>' + h + '</td><td class="' + cls + '">' + (v.ic>=0?'+':'') + v.ic.toFixed(4) + '</td><td>' + v.days + '</td></tr>';
+    });
+    html += '</tbody></table></div></div>';
+    document.getElementById('research-result-area').innerHTML = html;
+  } catch(e) { if (status) status.textContent = '❌ 失败'; }
+}
+
+async function _old_runResearchLayer() {
+  const factor = document.getElementById('research-factor')?.value || 'composite_short';
+  const status = document.getElementById('research-status');
+  if (status) status.textContent = '⏳ 分层测试中...';
+  try {
+    const r = await fetch('/api/research/layer-test', {method:'POST',headers:{'Content-Type':'application/json'},body: JSON.stringify({factor_name:factor})}).then(r=>r.json());
+    if (status) status.textContent = '✅ 完成';
+    if (r.error) return;
+    const layers = r.layers || {};
+    let html = '<div class="detail-card" style="margin-bottom:var(--space-4);"><div class="detail-card-header">📋 分层收益 · ' + factor + '</div><div class="detail-card-body" style="padding:0;overflow-x:auto;"><table class="job-table"><thead><tr><th>持有期</th><th>Top10</th><th>Top20</th><th>Top50</th><th>单调</th></tr></thead><tbody>';
+    Object.entries(layers).forEach(([h,data]) => {
+      const t10 = data.top10||{}; const t20 = data.top20||{}; const t50 = data.top50||{};
+      const mono = t10.avg > t20.avg && t20.avg > t50.avg;
+      html += '<tr><td>' + h + '</td><td class="'+(t10.avg>=0?'up':'down')+'">'+(t10.avg>=0?'+':'')+t10.avg+'%</td><td class="'+(t20.avg>=0?'up':'down')+'">'+(t20.avg>=0?'+':'')+t20.avg+'%</td><td class="'+(t50.avg>=0?'up':'down')+'">'+(t50.avg>=0?'+':'')+t50.avg+'%</td><td>'+(mono?'✅':'⚠️')+'</td></tr>';
+    });
+    html += '</tbody></table></div></div>';
+    document.getElementById('research-result-area').innerHTML = html;
+  } catch(e) { if (status) status.textContent = '❌ 失败'; }
+}
+
+async function _old_runResearchQuantile() {
+  const factor = document.getElementById('research-factor')?.value || 'composite_short';
+  const status = document.getElementById('research-status');
+  if (status) status.textContent = '⏳ 十分位测试中...';
+  try {
+    const result = await fetch('/api/research/stats').then(r=>r.json());
+    if (status) status.textContent = '✅ 完成';
+    if (result.error) return;
+    const qData = result.quantile || [];
+    const horizons = [...new Set(qData.map(r=>r.horizon))];
+    let html = '<div class="detail-card" style="margin-bottom:var(--space-4);"><div class="detail-card-header">📐 十分位收益</div><div class="detail-card-body" style="padding:0;overflow-x:auto;"><table class="job-table"><thead><tr><th>持有期</th><th>Q1</th><th>Q2</th><th>Q3</th><th>Q4</th><th>Q5</th><th>Q6</th><th>Q7</th><th>Q8</th><th>Q9</th><th>Q10</th></tr></thead><tbody>';
+    horizons.forEach(h => {
+      html += '<tr><td>' + h + '</td>';
+      for (let q=1; q<=10; q++) {
+        const row = qData.find(r => r.horizon === h && r.quantile === 'Q'+q);
+        const v = row ? row.avg_return : null;
+        html += '<td class="'+(v!==null&&v>0?'up':'down')+'">'+(v!==null?(v>=0?'+':'')+v+'%':'-')+'</td>';
+      }
+      html += '</tr>';
+    });
+    html += '</tbody></table></div></div>';
+    document.getElementById('research-result-area').innerHTML = html;
+  } catch(e) { if (status) status.textContent = '❌ 失败'; }
+}
+
+function onResearchFactorChange() {}
+
+async function _old_runResearchReport(type) {
+  const status = document.getElementById('backtest-status');
+  if (status) status.textContent = '⏳ 生成中...';
+  try {
+    const result = await fetch('/api/research/' + type).then(r => r.json());
+    if (status) status.textContent = '✅ 完成';
+    if (result.error) return;
+
+    let html = '<div class="detail-card" style="margin-top:var(--space-4);"><div class="detail-card-header">' + (type==='layer'?'📊 分层收益报告':'📐 十分位收益报告') + '</div>';
+    if (type === 'layer') {
+      html += '<div class="detail-card-body" style="padding:0;overflow-x:auto;"><table class="job-table"><thead><tr><th>持有期</th><th>单调</th><th>Top10</th><th>Top20</th><th>Top50</th></tr></thead><tbody>';
+      Object.entries(result).forEach(([h, data]) => {
+        const ok = data.monotonic ? '✅' : '⚠️';
+        html += '<tr><td><b>' + h + '</b><br><span style="font-size:10px;color:var(--fg-muted);">' + data.signal_days + '天</span></td><td>' + ok + '</td>';
+        data.layers.forEach(n => {
+          const v = data.summary['top'+n];
+          html += v ? '<td><b>' + (v.avg>=0?'+':'') + v.avg + '%</b><br><span style="font-size:10px;color:var(--fg-muted);">胜' + v.win_rate + ' 盈' + (v.avg_win>=0?'+':'') + v.avg_win + '% 亏' + v.avg_loss + '%</span></td>' : '<td>-</td>';
+        });
+        html += '</tr>';
+      });
+      html += '</tbody></table></div>';
+    } else {
+      Object.entries(result).forEach(([h, data]) => {
+        const ok = data.monotonic ? '✅' : '⚠️';
+        html += '<div class="detail-card-body" style="padding:0;overflow-x:auto;"><div style="padding:8px 16px;font-size:12px;"><b>' + h + '</b> ' + ok + ' (' + data.signal_days + '天)</div><table class="job-table"><thead><tr><th>Q1</th><th>Q2</th><th>Q3</th><th>Q4</th><th>Q5</th><th>Q6</th><th>Q7</th><th>Q8</th><th>Q9</th><th>Q10</th></tr></thead><tbody><tr>';
+        for (let q=1; q<=10; q++) {
+          const v = data.summary['Q'+q];
+          html += v ? '<td style="text-align:center;"><b>' + (v.avg>=0?'+':'') + v.avg + '%</b><br><span style="font-size:10px;color:var(--fg-muted);">胜' + v.win_rate + '</span></td>' : '<td>-</td>';
+        }
+        html += '</tr></tbody></table></div>';
+      });
+    }
+    html += '</div>';
+    document.getElementById('backtest-layer-area').innerHTML = html;
+  } catch(e) { if (status) status.textContent = '❌ 失败'; }
+}
+
+async function runLayerAnalysis() {
+  const status = document.getElementById('backtest-status');
+  if (status) status.textContent = '⏳ 分层分析中...';
+  try {
+    const result = await fetch('/api/backtest/layer', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({start_date:'2026-05-13', factor_name:'composite_short'}),
+    }).then(r => r.json());
+    if (status) status.textContent = '✅ 完成 · ' + result.signal_days + '天';
+    if (result.error) return;
+
+    const s = result.summary;
+    const exits = result.exit_modes || ['固定持有'];
+    let html = `<div class="detail-card" style="margin-top:var(--space-4);"><div class="detail-card-header">📊 分层收益分析 · 持有5日 · ${result.signal_days} 个信号日</div>
+      <div class="detail-card-body">`;
+    exits.forEach(exitMode => {
+      html += `<div style="margin-bottom:12px;"><div style="font-size:13px;font-weight:600;margin-bottom:6px;">📌 ${exitMode}</div><div style="display:flex;gap:var(--space-4);flex-wrap:wrap;">`;
+      ['top10','top20','top50'].forEach(k => {
+        const key = k + '_' + (exitMode === '固定持有' ? 'fixed' : exitMode === '跌出Top20卖' ? 'rank_drop' : 'ma20');
+        const v = s[key]; if (!v) return;
+        html += `<div style="text-align:center;min-width:100px;padding:8px;background:var(--bg-surface);border-radius:8px;">
+          <div style="font-size:11px;color:var(--fg-muted);">${k}</div>
+          <div style="font-size:18px;font-weight:700;color:var(--accent-3);">${v.avg}</div>
+          <div style="font-size:10px;color:var(--fg-muted);">胜率 ${v.win_rate}</div>
+          <div style="font-size:10px;color:var(--fg-muted);">盈${v.avg_win} / 亏${v.avg_loss}</div>
+          <div style="font-size:10px;color:var(--fg-muted);">最佳 ${v.best}</div></div>`;
+      });
+      html += '</div></div>';
+    });
+    html += '</div></div></div>';
+    document.getElementById('backtest-layer-area').innerHTML = html;
+  } catch(e) { if (status) status.textContent = '❌ 失败'; }
+}
+
+async function runBacktest() {
+  const status = document.getElementById('backtest-status');
+  if (status) status.textContent = '⏳ 回测中...';
+  let elapsed = 0;
+  const timer = setInterval(() => { elapsed++; if (status) status.textContent = '⏳ 回测中... ' + elapsed + 's'; }, 1000);
+  try {
+    const result = await fetch('/api/backtest/run', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({start_date:'2026-05-13', factor_name:'composite_short', top_n:10}),
+    }).then(r => r.json());
+    clearInterval(timer);
+    if (status) status.textContent = result.cached ? '⚡ 缓存' : '✅ 完成';
+    if (result.error) {
+      document.getElementById('backtest-summary-area').innerHTML = '<div class="detail-card"><div class="detail-card-body"><div class="empty-state"><span class="empty-icon">⚠️</span>' + result.message + '</div></div></div>';
+      return;
+    }
+    const s = result.summary;
+    let sumHtml = `<div class="detail-card" style="margin-top:var(--space-4);"><div class="detail-card-header">📊 收益概览 · ${s.total_days} 个交易日</div>
+      <div class="detail-card-body"><div style="display:flex;gap:var(--space-4);flex-wrap:wrap;">`;
+    [['总收益',s.total_return,s.total_return.startsWith('+')?'var(--accent)':'var(--danger)'],
+     ['基准收益',s.benchmark_return,'var(--fg-muted)'],
+     ['超额收益',s.excess_return,s.excess_return.startsWith('+')?'var(--accent)':'var(--danger)'],
+     ['夏普比率',s.sharpe,'var(--accent-3)'],
+     ['最大回撤',s.max_drawdown,'var(--danger)'],
+     ['胜率',s.win_rate,'var(--fg-primary)']].forEach(([l,v,c]) => {
+      sumHtml += `<div style="text-align:center;min-width:80px;"><div style="font-size:11px;color:var(--fg-muted);">${l}</div><div style="font-size:18px;font-weight:700;color:${c};">${v}</div></div>`;
+    });
+    sumHtml += '</div></div></div>';
+    document.getElementById('backtest-summary-area').innerHTML = sumHtml;
+    drawBacktestChart(result.daily);
+    let detHtml = `<div class="detail-card" style="margin-top:var(--space-4);">
+      <div class="detail-card-header" onclick="document.getElementById('bt-detail-body').classList.toggle('hidden')" style="cursor:pointer;">📋 每日明细 (点击展开)</div>
+      <div class="detail-card-body hidden" id="bt-detail-body" style="padding:0;overflow-x:auto;">
+      <table class="job-table"><thead><tr><th>日期</th><th>日收益</th><th>累积</th><th>基准收益</th><th>基准累积</th></tr></thead><tbody>`;
+    result.daily.forEach(d => {
+      detHtml += `<tr><td>${d.date}</td><td class="${d.ret>=0?'up':'down'}">${d.ret>=0?'+':''}${d.ret}%</td>
+        <td class="${d.cumulative>=0?'up':'down'}">${d.cumulative>=0?'+':''}${d.cumulative}%</td>
+        <td class="${d.benchmark_ret>=0?'up':'down'}">${d.benchmark_ret>=0?'+':''}${d.benchmark_ret}%</td>
+        <td class="${d.bench_cum>=0?'up':'down'}">${d.bench_cum>=0?'+':''}${d.bench_cum}%</td></tr>`;
+    });
+    detHtml += '</tbody></table></div></div>';
+    document.getElementById('backtest-detail-area').innerHTML = detHtml;
+    runLayerAnalysis();
+  } catch(e) { clearInterval(timer); if (status) status.textContent = '❌ 失败'; }
+}
+
+function drawBacktestChart(daily) {
+  const area = document.getElementById('backtest-chart-area');
+  if (!daily || daily.length === 0) { area.innerHTML = ''; return; }
+  area.innerHTML = `<div class="detail-card" style="margin-top:var(--space-4);"><div class="detail-card-header">📈 收益曲线</div><div class="detail-card-body"><canvas id="bt-canvas" style="width:100%;height:300px;"></canvas></div></div>`;
+  setTimeout(() => {
+    const canvas = document.getElementById('bt-canvas'); if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    const W = canvas.parentElement.clientWidth, H = 300;
+    canvas.width = W * 2; canvas.height = H * 2;
+    canvas.style.width = W + 'px'; canvas.style.height = H + 'px';
+    ctx.scale(2, 2);
+    const pad = {top:20,right:20,bottom:40,left:60};
+    const pw = W - pad.left - pad.right, ph = H - pad.top - pad.bottom;
+    const vals = daily.map(d => d.cumulative), bvals = daily.map(d => d.bench_cum);
+    const allVals = [...vals, ...bvals, 0];
+    const yMin = Math.min(...allVals), yMax = Math.max(...allVals), yRange = Math.max(yMax - yMin, 1);
+    const xS = i => pad.left + (i / Math.max(daily.length - 1, 1)) * pw;
+    const yS = v => pad.top + (1 - (v - yMin) / yRange) * ph;
+    ctx.strokeStyle = 'rgba(255,255,255,0.04)'; ctx.lineWidth = 1;
+    for (let i = 0; i <= 5; i++) { const y = pad.top + (i / 5) * ph; ctx.beginPath(); ctx.moveTo(pad.left, y); ctx.lineTo(W - pad.right, y); ctx.stroke(); }
+    ctx.strokeStyle = '#3b82f6'; ctx.lineWidth = 2.5; ctx.beginPath();
+    daily.forEach((d, i) => { const x = xS(i), y = yS(d.cumulative); i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y); }); ctx.stroke();
+    ctx.strokeStyle = '#64748b'; ctx.lineWidth = 1.5; ctx.setLineDash([6, 4]); ctx.beginPath();
+    daily.forEach((d, i) => { const x = xS(i), y = yS(d.bench_cum); i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y); }); ctx.stroke(); ctx.setLineDash([]);
+    ctx.fillStyle = '#94a3b8'; ctx.font = '11px Inter, sans-serif';
+    daily.forEach((d, i) => { if (i % Math.ceil(daily.length / 8) === 0 || i === daily.length - 1) ctx.fillText(d.date.slice(5), xS(i) - 20, H - 10); });
+    for (let i = 0; i <= 5; i++) { const v = yMin + (i / 5) * yRange; ctx.fillText(v.toFixed(1) + '%', 4, yS(v) + 4); }
+    ctx.fillStyle = '#3b82f6'; ctx.fillRect(W - 180, 8, 12, 12);
+    ctx.fillStyle = '#94a3b8'; ctx.fillText('策略', W - 164, 19);
+    ctx.strokeStyle = '#64748b'; ctx.lineWidth = 1.5; ctx.setLineDash([4, 3]); ctx.beginPath(); ctx.moveTo(W - 100, 14); ctx.lineTo(W - 80, 14); ctx.stroke(); ctx.setLineDash([]);
+    ctx.fillStyle = '#94a3b8'; ctx.fillText('基准', W - 76, 19);
+  }, 100);
+}
+
+function loadCompositeTab() {
+  const container = document.getElementById('stocks-composite-tab');
+  if (!container) return;
+
+  const composites = [
+    {
+      name: 'composite_short',
+      desc: '短线组合(行业+相对+突破+量能+斜率)',
+      detail: '30%行业强度 + 25%相对强度 + 20%突破 + 15%量能 + 10%MA20斜率',
+      filter: 'ST/新股/低成交 + 行业Top30% + MA多头 + BB收敛前60% + 距新高≤15%',
+    },
+  ];
+
+  let html = `<div class="detail-card">
+    <div class="detail-card-header">🧩 组合因子 · ${composites.length} 个模型</div>
+    <div class="detail-card-body">`;
+
+  composites.forEach(c => {
+    html += `<div class="detail-card" style="margin-bottom:var(--space-3);border:1px solid var(--border-subtle);">
+      <div class="detail-card-header" style="font-size:14px;">${c.desc}</div>
+      <div class="detail-card-body">
+        <div style="font-size:12px;color:var(--fg-muted);line-height:1.8;margin-bottom:12px;">
+          <b>加权：</b>${c.detail}<br><b>过滤：</b>${c.filter}
+        </div>
+        <button class="factor-run-btn" onclick="showCompositeExecModal('${c.name}')">▶ 执行</button>
+        <span id="composite-status-${c.name}" style="margin-left:12px;font-size:12px;color:var(--fg-muted);"></span>
+      </div>
+      <div id="composite-result-${c.name}"></div>
+    </div>`;
+  });
+
+  html += '</div></div>';
+  container.innerHTML = html;
+
+  // 加载已有缓存结果
+  loadCompositeHistory();
+}
+
+async function loadCompositeHistory() {
+  try {
+    const history = await fetch('/api/factors/history').then(r => r.json());
+    const todayHistory = (history || []).filter(h => (h.date || '') === _stocksDate);
+    todayHistory.forEach(h => {
+      if (h.factor_name && h.factor_name.startsWith('composite_')) {
+        showCompositeCached(h.factor_name, h);
+      }
+    });
+  } catch(e) {}
+}
+
+async function showCompositeCached(factorName, h) {
+  const status = document.getElementById('composite-status-' + factorName);
+  if (status) status.textContent = '📦 缓存 · Top' + h.top_n + ' · ' + h.elapsed + 's · ' + (h.saved_at || '').slice(11,19);
+  try {
+    const result = await fetch('/api/factors/result/' + h.cache_key).then(r => r.json());
+    const area = document.getElementById('composite-result-' + factorName);
+    if (!area || !result.rows) return;
+    renderCompositeTable(area, result);
+  } catch(e) {}
+}
+
+function scrollToElement(id) {
+  const el = document.getElementById(id);
+  if (el) {
+    const top = el.getBoundingClientRect().top + window.scrollY - 110;
+    window.scrollTo({ top, behavior: 'smooth' });
+  }
+}
+function scrollToFactorCard() {
+  const card = document.querySelector('#stocks-factors-tab .detail-card');
+  if (card) {
+    const top = card.getBoundingClientRect().top + window.scrollY - 110;
+    window.scrollTo({ top, behavior: 'smooth' });
+  }
+}
+
+function codeLink(code) {
+  return '<a href="https://stockpage.10jqka.com.cn/' + code + '/" target="_blank" class="code-link">' + code + '</a>';
+}
+
+function getStockSector(code) {
+  if (!code) return '';
+  if (code.startsWith('300') || code.startsWith('301')) return '创业板';
+  if (code.startsWith('688')) return '科创板';
+  if (code.startsWith('000') || code.startsWith('001') || code.startsWith('002') || code.startsWith('003')) return '深主板';
+  if (code.startsWith('600') || code.startsWith('601') || code.startsWith('603') || code.startsWith('605')) return '沪主板';
+  return '';
+}
+function getStockIndustry(code) { return _industryMap[code] || ''; }
+async function loadIndustryMap() {
+  try { _industryMap = await fetch('/api/stocks/industries').then(r => r.json()); } catch(e) {}
+}
+
+function renderCompositeTable(area, result) {
+  const colLabels = {rank:'排名', code:'代码', name:'名称', sector:'板块', industry:'行业', score:'得分', close:'收盘价', change_pct:'涨跌幅', mcap:'市值', turnover_pct:'换手率', amount_avg_20d:'日均成交'};
+  const cols = [...result.columns];
+  const nameIdx = cols.indexOf('name');
+  if (nameIdx >= 0 && !cols.includes('sector')) { cols.splice(nameIdx + 1, 0, 'sector'); cols.splice(nameIdx + 2, 0, 'industry'); }
+
+  let html = '<div style="padding:0 var(--space-3) var(--space-3);font-size:11px;color:var(--accent);">📦 上次缓存结果 · ' + result.count + ' 条</div>';
+  html += '<div style="overflow-x:auto;padding:0 var(--space-3) var(--space-3);"><table class="job-table"><thead><tr>' + cols.map(c => '<th>' + (colLabels[c]||c) + '</th>').join('') + '</tr></thead><tbody>';
+  result.rows.forEach(row => {
+    html += '<tr>';
+    cols.forEach(col => {
+      let val = col === 'code' ? codeLink(row.code) : (col === 'sector' ? getStockSector(row.code) : (col === 'industry' ? getStockIndustry(row.code) : (row[col] !== undefined ? row[col] : '-')));
+      let cls = '';
+      if (col === 'code') cls = 'code-cell';
+      if (col === 'change_pct' && String(val).charAt(0) === '+') cls = 'up';
+      else if (col === 'change_pct' && String(val).charAt(0) === '-') cls = 'down';
+      html += '<td class="' + cls + '">' + val + '</td>';
+    });
+    html += '</tr>';
+  });
+  html += '</tbody></table></div>';
+  area.innerHTML = html;
+}
+
+function showCompositeExecModal(factorName) {
+  const overlay = document.createElement('div');
+  overlay.className = 'fam-modal-overlay';
+  overlay.innerHTML = `<div class="fam-modal" style="max-width:400px;">
+    <div class="fam-modal-header">
+      <span>▶ 执行组合因子</span>
+      <button class="fam-modal-close" onclick="this.closest('.fam-modal-overlay').remove()">✕</button>
+    </div>
+    <div class="fam-modal-body">
+      <div style="margin-bottom:14px;font-size:14px;">${factorName}</div>
+      <div style="margin-bottom:10px;">
+        <span style="font-size:12px;color:var(--fg-muted);">返回 Top N</span>
+        <div style="display:flex;align-items:center;gap:4px;margin-top:4px;">
+          <span class="topn-chips" id="comp-topn-chips">
+            <button type="button" class="topn-chip" onclick="setTopN(10,this)">10</button>
+            <button type="button" class="topn-chip active" onclick="setTopN(20,this)">20</button>
+            <button type="button" class="topn-chip" onclick="setTopN(30,this)">30</button>
+            <button type="button" class="topn-chip" onclick="setTopN(40,this)">40</button>
+            <button type="button" class="topn-chip" onclick="setTopN(50,this)">50</button>
+            <button type="button" class="topn-chip" onclick="setTopN(60,this)">60</button>
+            <button type="button" class="topn-chip" onclick="setTopN(80,this)">80</button>
+            <button type="button" class="topn-chip" onclick="setTopN(100,this)">100</button>
+          </span>
+          <input type="number" id="comp-topn-input" value="20" min="1" max="9999" style="width:60px;padding:4px 6px;border:1px solid var(--border-default);border-radius:4px;background:var(--bg-surface);color:var(--fg-primary);font-size:13px;text-align:center;"
+            oninput="document.querySelectorAll('#comp-topn-chips .topn-chip').forEach(c=>c.classList.toggle('active',c.textContent==this.value))">
+        </div>
+      </div>
+      <div style="font-size:11px;color:var(--fg-muted);">日期: ${_stocksDate}</div>
+    </div>
+    <div class="fam-modal-footer">
+      <button class="fam-btn-cancel" onclick="this.closest('.fam-modal-overlay').remove()">取消</button>
+      <button class="fam-btn-save" onclick="runComposite('${factorName}',parseInt(document.getElementById('comp-topn-input').value||'15'));this.closest('.fam-modal-overlay').remove()">▶ 执行</button>
+    </div>
+  </div>`;
+  document.body.appendChild(overlay);
+  overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
+}
+
+async function runComposite(factorName, topN) {
+  const status = document.getElementById('composite-status-' + factorName);
+  const area = document.getElementById('composite-result-' + factorName);
+  if (status) status.textContent = '⏳ 计算中...';
+  let elapsed2 = 0;
+  const timer2 = setInterval(() => { elapsed2++; if (status) status.textContent = '⏳ 计算中... ' + elapsed2 + 's'; }, 1000);
+
+  try {
+    const result = await fetch('/api/factors/run', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({factor_name: factorName, date: _stocksDate, top_n: topN}),
+    }).then(r => r.json());
+
+    clearInterval(timer2);
+    if (status) status.textContent = result.cached ? '⚡ 缓存 · ' + result.elapsed + 's' : '✅ ' + result.elapsed + 's';
+
+    if (!area) return;
+    if (result.error) { area.innerHTML = `<div class="empty-state"><span class="empty-icon">⚠️</span>${result.message}</div>`; return; }
+    if (!result.rows || result.rows.length === 0) { area.innerHTML = `<div class="empty-state"><span class="empty-icon">📭</span>无符合条件的股票</div>`; return; }
+
+    renderCompositeTable(area, result);
+  } catch(e) {
+    if (status) status.textContent = '❌ 失败';
+  }
+}
+
+async function loadFactorsTab() {
+  const container = document.getElementById('stocks-factors-tab');
+  if (!container) return;
+
+  // 加载元数据
+  if (!_factorsMeta) {
+    try {
+      _factorsMeta = await fetch('/api/factors').then(r => r.json());
+    } catch(e) { _factorsMeta = {factors:[], filters:[]}; }
+  }
+  const { factors } = _factorsMeta;
+
+  let html = `<div class="quick-nav-bar">
+    <span class="quick-nav-label">跳转：</span>
+    <a class="quick-nav-link" href="javascript:scrollToFactorCard()">🧬 因子列表</a>
+    <a class="quick-nav-link" href="javascript:scrollToElement('factor-result-area')">📋 执行结果</a>
+    <a class="quick-nav-link" href="javascript:scrollToElement('filter-snapshot-area')">🚫 剔除因子</a>
+    <a class="quick-nav-link" href="javascript:scrollToElement('factor-history-area')">📜 历史记录</a>
+  </div>
+  <div class="detail-card">
+    <div class="detail-card-header">🧬 因子库 · ${factors.length} 个因子</div>
+    <div class="detail-card-body">`;
+  const catOrder = ['涨跌幅','量能','形态','位置','综合'];
+  let selectedFactor = factors.length > 0 ? factors[0].name : 'ret_5d';
+  const grouped = {};
+  factors.forEach(f => {
+    const meta = FACTOR_META[f.name] || {cat:'其他', formula:''};
+    if (!grouped[meta.cat]) grouped[meta.cat] = [];
+    grouped[meta.cat].push({...f, formula: meta.formula});
+  });
+  catOrder.forEach(cat => {
+    const items = grouped[cat];
+    if (!items) return;
+    html += '<div class="factor-cat-section"><span class="factor-cat-title">' + cat + '</span>';
+    items.forEach(f => {
+      const sel = f.name === selectedFactor ? ' selected' : '';
+      html += '<span class="factor-chip' + sel + '" id="fcard-' + f.name + '" onclick="selectFactor(\'' + f.name + '\');showFactorDetail(\'' + f.name + '\')">' + f.desc + ' <code>' + f.name + '</code><sup class="fchip-run" onclick="event.stopPropagation();selectFactor(\'' + f.name + '\');showExecuteModal()">▶</sup></span>';
+    });
+    html += '</div>';
+  });
+
+  html += `</div></div>
+  <input type="hidden" id="factor-select" value="${selectedFactor}">
+  <input type="hidden" id="factor-topn" value="100">
+
+  <div id="factor-result-area">
+    <div class="detail-card"><div class="detail-card-body"><div class="empty-state"><span class="empty-icon">🎯</span>选择因子后点击「执行」查看排名</div></div></div>
+  </div>
+
+  <div id="filter-snapshot-area"></div>
+
+  <div id="sector-heat-area"></div>
+
+  <div id="factor-history-area"></div>`;
+
+  container.innerHTML = html;
+
+  // 加载剔除因子快照 + 历史记录
+  loadFilterSnapshot();
+  loadFactorHistory();
+}
+
+async function loadSectorHeat() {
+  const area = document.getElementById('sector-heat-area');
+  if (!area) return;
+  try {
+    let r = await fetch(`/api/stocks/sectors?date=${_stocksDate}`).then(r => r.json());
+    // 当天无数据时回退到最新可用日期
+    if (!r.sectors || r.sectors.length === 0) {
+      r = await fetch('/api/stocks/sectors').then(r => r.json());
+    }
+    const sectors = r.sectors || [];
+    if (sectors.length === 0) { area.innerHTML = ''; return; }
+
+    let html = `<div class="detail-card" style="margin-top:var(--space-4);">
+      <div class="detail-card-header">🔥 板块热度 · ${sectors.length} 个行业 · ${r.date || ''}</div>
+      <div class="detail-card-body" style="padding:var(--space-3);">
+        <div class="sector-heat-strip">`;
+    sectors.forEach((s, i) => {
+      const cls = s.change_pct >= 0 ? 'up' : 'down';
+      html += `<span class="sector-heat-chip ${cls}" title="排名${i+1}: ${s.name} ${s.change_pct>=0?'+':''}${s.change_pct}% 成交${s.turnover_yi}亿">
+        ${i+1}.${s.name} <span>${s.change_pct>=0?'+':''}${s.change_pct}%</span>
+      </span>`;
+    });
+    html += '</div></div></div>';
+    area.innerHTML = html;
+  } catch(e) { area.innerHTML = ''; }
+}
+
+function showExecuteModal() {
+  const factorName = document.getElementById('factor-select')?.value || 'ret_5d';
+
+  const overlay = document.createElement('div');
+  overlay.className = 'fam-modal-overlay'; overlay.id = 'exec-modal-overlay';
+  overlay.innerHTML = `<div class="fam-modal" style="max-width:400px;">
+    <div class="fam-modal-header">
+      <span>▶ 执行因子</span>
+      <button class="fam-modal-close" onclick="this.closest('.fam-modal-overlay').remove()">✕</button>
+    </div>
+    <div class="fam-modal-body">
+      <div style="margin-bottom:14px;font-size:14px;">${getFactorLabel(factorName)}</div>
+      <div style="margin-bottom:10px;">
+        <span style="font-size:12px;color:var(--fg-muted);">Top N</span>
+        <div style="display:flex;align-items:center;gap:4px;margin-top:4px;">
+          <span class="topn-chips" id="exec-topn-chips">
+            <button type="button" class="topn-chip" onclick="setTopN(10,this)">10</button>
+            <button type="button" class="topn-chip" onclick="setTopN(20,this)">20</button>
+            <button type="button" class="topn-chip" onclick="setTopN(50,this)">50</button>
+            <button type="button" class="topn-chip active" onclick="setTopN(100,this)">100</button>
+            <button type="button" class="topn-chip" onclick="setTopN(300,this)">300</button>
+            <button type="button" class="topn-chip" onclick="setTopN(0,this)">全部</button>
+          </span>
+          <input type="number" id="exec-topn-input" value="100" min="1" max="9999" style="width:60px;padding:4px 6px;border:1px solid var(--border-default);border-radius:4px;background:var(--bg-surface);color:var(--fg-primary);font-size:13px;text-align:center;"
+            oninput="document.querySelectorAll('#exec-topn-chips .topn-chip').forEach(c=>c.classList.toggle('active',c.textContent==this.value))">
+        </div>
+      </div>
+      <div style="font-size:11px;color:var(--fg-muted);">日期: ${_stocksDate} · 过滤: 剔除ST、新股、低成交</div>
+    </div>
+    <div class="fam-modal-footer">
+      <button class="fam-btn-cancel" onclick="this.closest('.fam-modal-overlay').remove()">取消</button>
+      <button class="fam-btn-save" onclick="doExecute(this.closest('.fam-modal-overlay'))">▶ 执行</button>
+    </div>
+  </div>`;
+  document.body.appendChild(overlay);
+  overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
+}
+
+function doExecute(overlay) {
+  const topN = parseInt(document.getElementById('exec-topn-input')?.value || '100');
+  document.getElementById('factor-topn').value = topN;
+  overlay.remove();
+  executeFactor();
+}
+
+async function executeFactor() {
+  const factorName = document.getElementById('factor-select')?.value || 'ret_5d';
+  const topN = parseInt(document.getElementById('factor-topn')?.value || '100');
+  const date = _stocksDate;
+
+  const btn = document.querySelector('.factor-run-btn');
+  const statusArea = document.getElementById('factor-result-area');
+  if (btn) { btn.textContent = '⏳ 执行中...'; btn.disabled = true; }
+  // 进度计时器
+  let elapsed = 0;
+  const timer = setInterval(() => { elapsed++; if (statusArea) statusArea.innerHTML = `<div class="detail-card"><div class="detail-card-body"><div class="empty-state"><span class="empty-icon">⏳</span>执行中... ${elapsed}s</div></div></div>`; }, 1000);
+
+  const t0 = performance.now();
+  let result;
+  try {
+    result = await fetch('/api/factors/run', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({factor_name: factorName, date, top_n: topN}),
+    }).then(r => r.json());
+  } catch(e) {
+    result = {rows: [], columns: [], elapsed: 0, count: 0};
+  }
+  clearInterval(timer);
+  const clientElapsed = ((performance.now() - t0) / 1000).toFixed(1);
+
+  if (btn) { btn.textContent = '▶ 执行'; btn.disabled = false; }
+
+  renderFactorResult(result, factorName, topN, date, null, clientElapsed);
+
+  // 刷新历史记录
+  loadFactorHistory();
+}
+
+function renderFactorResult(result, factorName, topN, date, filters, clientElapsed) {
+  const area = document.getElementById('factor-result-area');
+  if (!area) return;
+
+  if (result.error) {
+    area.innerHTML = `<div class="detail-card"><div class="detail-card-body"><div class="empty-state"><span class="empty-icon">⚠️</span>${result.message || '执行失败'}</div></div></div>`;
+    return;
+  }
+
+  if (!result.rows || result.rows.length === 0) {
+    area.innerHTML = `<div class="detail-card"><div class="detail-card-body"><div class="empty-state"><span class="empty-icon">📭</span>无结果 · 服务端耗时 ${result.elapsed || 0}s</div></div></div>`;
+    return;
+  }
+
+  const cachedBadge = result.cached ? ' <span style="font-size:11px;background:var(--accent);color:#000;padding:2px 8px;border-radius:10px;margin-left:8px;">⚡ 缓存</span>' : '';
+
+  const colLabels = {rank:'排名', code:'代码', name:'名称', sector:'板块', industry:'行业', score:'因子得分', close:'收盘价', change_pct:'涨跌幅', mcap:'市值', turnover_pct:'换手率', amount_avg_20d:'日均成交'};
+  const filterLabel = filterCN(filters && filters.length > 0 ? filters : null);
+  const cols = [...result.columns];
+  const nameIdx = cols.indexOf('name');
+  if (nameIdx >= 0 && !cols.includes('sector')) { cols.splice(nameIdx + 1, 0, 'sector'); cols.splice(nameIdx + 2, 0, 'industry'); }
+
+  let tableHtml = `<div class="detail-card"><div class="detail-card-header">📋 ${getFactorLabel(factorName)} · Top ${topN} · ${date} · 过滤: ${filterLabel}${cachedBadge}</div>
+    <div class="detail-card-body" style="padding:0;overflow-x:auto;">
+    <table class="job-table"><thead><tr>${cols.map(c => `<th>${colLabels[c] || c}</th>`).join('')}</tr></thead><tbody>`;
+
+  result.rows.forEach(row => {
+    tableHtml += '<tr>';
+    cols.forEach(col => {
+      let val = col === 'code' ? codeLink(row.code) : (col === 'sector' ? getStockSector(row.code) : (col === 'industry' ? getStockIndustry(row.code) : (row[col] !== undefined ? row[col] : '-')));
+      let cls = '';
+      if (col === 'code') cls = 'code-cell';
+      if (col === 'score') {
+        const sign = String(val).charAt(0);
+        cls = sign === '+' ? 'up' : (sign === '-' ? 'down' : '');
+      }
+      if (col === 'change_pct') {
+        const sign = String(val).charAt(0);
+        cls = sign === '+' ? 'up' : (sign === '-' ? 'down' : '');
+      }
+      tableHtml += `<td class="${cls}">${val}</td>`;
+    });
+    tableHtml += '</tr>';
+  });
+
+  tableHtml += '</tbody></table></div></div>';
+  tableHtml += `<div style="text-align:right;font-size:11px;color:var(--fg-muted);padding:4px 8px;">共 ${result.count} 条 · 服务端 ${result.elapsed}s · 总耗时 ${clientElapsed}s</div>`;
+
+  area.innerHTML = tableHtml;
+}
+
+async function loadFactorHistory() {
+  const area = document.getElementById('factor-history-area');
+  if (!area) return;
+
+  let history;
+  try {
+    history = await fetch('/api/factors/history').then(r => r.json());
+  } catch(e) { history = []; }
+
+  if (!history || history.length === 0) {
+    area.innerHTML = '';
+    return;
+  }
+
+  // 确保元数据已加载，构建因子名 → 中文描述映射
+  if (!_factorsMeta) {
+    try { _factorsMeta = await fetch('/api/factors').then(r => r.json()); }
+    catch(e) { _factorsMeta = {factors:[], filters:[]}; }
+  }
+  const factorDesc = {};
+  (_factorsMeta.factors || []).forEach(f => { factorDesc[f.name] = f.desc; });
+
+  const filterLabel = (fs) => {
+    if (!fs || fs.length === 0) return filterCN();
+    return fs.join(', ');
+  };
+
+  // 只显示当天日期的历史，排除组合因子
+  const dayHistory = history.filter(h => (h.date || '') === _stocksDate && !h.factor_name.startsWith('composite_'));
+
+  let html = `<div class="detail-card" style="margin-top:var(--space-4);">
+    <div class="detail-card-header">📜 历史记录 · ${dayHistory.length} 条${history.length !== dayHistory.length ? '（共' + history.length + '条，已过滤）' : ''}</div>
+    <div class="detail-card-body" style="padding:0;">
+      <div class="factor-history-list">`;
+
+  dayHistory.forEach(h => {
+    const dateStr = h.date || '(最新)';
+    const desc = factorDesc[h.factor_name] || '';
+    const label = desc ? `${h.factor_name} — ${desc}` : h.factor_name;
+    html += `<div class="factor-history-item" id="fhi-${h.cache_key}">
+      <span class="fhi-body" onclick="loadCachedResult('${h.cache_key}')" title="点击查看结果">
+        <span class="fhi-factor">🧬 ${label}</span>
+        <span class="fhi-date">📅 ${dateStr}</span>
+        <span class="fhi-topn">Top ${h.top_n}</span>
+        <span class="fhi-filters">🔧 ${filterLabel(h.filters)}</span>
+        <span class="fhi-count">${h.count} 条</span>
+        <span class="fhi-time">⚡ ${h.elapsed}s</span>
+        <span class="fhi-saved">${(h.saved_at || '').slice(11,19)}</span>
+      </span>
+      <button class="fhi-del-btn" onclick="event.stopPropagation();deleteFactorCache('${h.cache_key}')" title="删除">🗑</button>
+    </div>`;
+  });
+
+  html += '</div></div></div>';
+  area.innerHTML = html;
+}
+
+async function loadCachedResult(cacheKey) {
+  // 高亮选中项
+  document.querySelectorAll('.factor-history-item').forEach(el => {
+    el.classList.toggle('active', el.id === 'fhi-' + cacheKey);
+  });
+
+  const area = document.getElementById('factor-result-area');
+  if (area) area.innerHTML = '<div class="detail-card"><div class="detail-card-body"><div class="empty-state">加载中...</div></div></div>';
+
+  let result;
+  try {
+    result = await fetch(`/api/factors/result/${cacheKey}`).then(r => r.json());
+  } catch(e) {
+    result = null;
+  }
+
+  if (!result || result.error) {
+    if (area) area.innerHTML = '<div class="detail-card"><div class="detail-card-body"><div class="empty-state"><span class="empty-icon">⚠️</span>缓存读取失败</div></div></div>';
+    return;
+  }
+
+  renderFactorResult(result, result.factor_name || '', result.top_n || 0, result.date || '', result.filters || [], '0');
+}
+
+async function deleteFactorCache(cacheKey) {
+  if (!confirm('确定删除这条缓存记录？')) return;
+  try {
+    await fetch(`/api/factors/result/${cacheKey}`, { method: 'DELETE' });
+  } catch(e) { /* ignore */ }
+  // 从 DOM 移除
+  const el = document.getElementById('fhi-' + cacheKey);
+  if (el) el.remove();
+  // 如果历史全部清空，刷新一下
+  const remaining = document.querySelectorAll('.factor-history-item');
+  if (remaining.length === 0) {
+    document.getElementById('factor-history-area').innerHTML = '';
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════
